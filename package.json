@@ -1,0 +1,27 @@
+{
+	"name": "rebalance-dlmm-bot",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"format": "biome format --write .",
+		"lint": "biome lint ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.13",
+		"@types/bn.js": "^5.2.0",
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^7"
+	},
+	"dependencies": {
+		"@meteora-ag/dlmm": "^1.9.14",
+		"@solana/web3.js": "^1.99.0",
+		"bn.js": "^5.2.5",
+		"bs58": "^6.0.0",
+		"effect": "^4.0.0-rc.113"
+	}
+}

@@ -1,0 +1,223 @@
+import DLMM, { type LbPosition, StrategyType } from "@meteora-ag/dlmm";
+import {
+	type Connection,
+	Keypair,
+	PublicKey,
+	sendAndConfirmTransaction,
+	type Transaction,
+} from "@solana/web3.js";
+import BN from "bn.js";
+import Decimal from "decimal.js";
+import { Data, Effect } from "effect";
+import type { PositionSnapshot } from "./plan.ts";
+
+export class DlmmError extends Data.TaggedError("DlmmError")<{
+	message: string;
+}> {}
+
+export interface LoadStateInput {
+	connection: Connection;
+	poolAddress: string;
+	owner: PublicKey;
+	positionAddress?: string;
+}
+
+export interface LoadedState {
+	dlmm: DLMM;
+	position: LbPosition;
+	snapshot: PositionSnapshot;
+}
+
+export interface ClaimFeesInput {
+	connection: Connection;
+	dlmm: DLMM;
+	signer: Keypair;
+	position: LbPosition;
+}
+
+export interface ExitPositionInput {
+	connection: Connection;
+	dlmm: DLMM;
+	signer: Keypair;
+	position: LbPosition;
+}
+
+export interface EnterPositionInput {
+	connection: Connection;
+	dlmm: DLMM;
+	signer: Keypair;
+	totalX: BN;
+	totalY: BN;
+	minBinId: number;
+	maxBinId: number;
+}
+
+function toDlmmError(error: unknown): DlmmError {
+	return new DlmmError({
+		message: error instanceof Error ? error.message : String(error),
+	});
+}
+
+function sendAll(
+	connection: Connection,
+	txs: Transaction[],
+	signers: Keypair[],
+): Effect.Effect<string[], DlmmError> {
+	return Effect.tryPromise({
+		try: async () => {
+			const signatures: string[] = [];
+			for (const tx of txs) {
+				signatures.push(
+					await sendAndConfirmTransaction(connection, tx, signers),
+				);
+			}
+			return signatures;
+		},
+		catch: toDlmmError,
+	});
+}
+
+export function loadPositionState(
+	input: LoadStateInput,
+): Effect.Effect<LoadedState, DlmmError> {
+	return Effect.gen(function* () {
+		const dlmm = yield* Effect.tryPromise({
+			try: async () =>
+				DLMM.create(input.connection, new PublicKey(input.poolAddress)),
+			catch: toDlmmError,
+		});
+		const { activeBin, userPositions } = yield* Effect.tryPromise({
+			try: () => dlmm.getPositionsByUserAndLbPair(input.owner),
+			catch: toDlmmError,
+		});
+
+		let position: LbPosition | undefined;
+		if (input.positionAddress) {
+			const wanted = input.positionAddress;
+			position = userPositions.find((p) => p.publicKey.toBase58() === wanted);
+			if (position === undefined) {
+				position = yield* Effect.tryPromise({
+					try: () => dlmm.getPosition(new PublicKey(wanted)),
+					catch: toDlmmError,
+				});
+			}
+		} else {
+			position = userPositions[0];
+		}
+		if (position === undefined) {
+			return yield* Effect.fail(
+				new DlmmError({
+					message: "no DLMM position found for owner in this pool",
+				}),
+			);
+		}
+
+		const data = position.positionData;
+		let activeBinPrice = activeBin.price;
+		try {
+			activeBinPrice = new Decimal(
+				dlmm.fromPricePerLamport(Number(activeBin.price)),
+			)
+				.toSignificantDigits(6)
+				.toString();
+		} catch {
+			activeBinPrice = activeBin.price;
+		}
+
+		const snapshot: PositionSnapshot = {
+			pool: dlmm.pubkey.toBase58(),
+			position: position.publicKey.toBase58(),
+			owner: input.owner.toBase58(),
+			activeBinId: activeBin.binId,
+			lowerBinId: data.lowerBinId,
+			upperBinId: data.upperBinId,
+			amountX: new BN(data.totalXAmount),
+			amountY: new BN(data.totalYAmount),
+			feeX: data.feeX,
+			feeY: data.feeY,
+			claimedFeeX: data.totalClaimedFeeXAmount,
+			claimedFeeY: data.totalClaimedFeeYAmount,
+			tokenXMint: dlmm.lbPair.tokenXMint.toBase58(),
+			tokenYMint: dlmm.lbPair.tokenYMint.toBase58(),
+			activeBinPrice,
+		};
+		return { dlmm, position, snapshot };
+	});
+}
+
+export function claimFees(
+	input: ClaimFeesInput,
+): Effect.Effect<string[], DlmmError> {
+	const data = input.position.positionData;
+	const pending = data.feeX
+		.add(data.feeY)
+		.add(data.rewardOne)
+		.add(data.rewardTwo);
+	if (pending.lte(new BN(0))) {
+		return Effect.succeed([]);
+	}
+	return Effect.gen(function* () {
+		const txs = yield* Effect.tryPromise({
+			try: () =>
+				input.dlmm.claimAllRewardsByPosition({
+					owner: input.signer.publicKey,
+					position: input.position,
+				}),
+			catch: toDlmmError,
+		});
+		return yield* sendAll(input.connection, txs, [input.signer]);
+	});
+}
+
+export function exitPosition(
+	input: ExitPositionInput,
+): Effect.Effect<string[], DlmmError> {
+	return Effect.gen(function* () {
+		const { lowerBinId, upperBinId } = input.position.positionData;
+		const txs = yield* Effect.tryPromise({
+			try: () =>
+				input.dlmm.removeLiquidity({
+					user: input.signer.publicKey,
+					position: input.position.publicKey,
+					fromBinId: lowerBinId,
+					toBinId: upperBinId,
+					bps: new BN(10_000),
+					shouldClaimAndClose: true,
+				}),
+			catch: toDlmmError,
+		});
+		return yield* sendAll(input.connection, txs, [input.signer]);
+	});
+}
+
+export function enterCurvePosition(
+	input: EnterPositionInput,
+): Effect.Effect<{ position: string; signature: string }, DlmmError> {
+	return Effect.gen(function* () {
+		const positionKeypair = Keypair.generate();
+		const tx = yield* Effect.tryPromise({
+			try: () =>
+				input.dlmm.initializePositionAndAddLiquidityByStrategy({
+					positionPubKey: positionKeypair.publicKey,
+					user: input.signer.publicKey,
+					totalXAmount: input.totalX,
+					totalYAmount: input.totalY,
+					strategy: {
+						minBinId: input.minBinId,
+						maxBinId: input.maxBinId,
+						strategyType: StrategyType.Curve,
+					},
+				}),
+			catch: toDlmmError,
+		});
+		const signatures = yield* sendAll(
+			input.connection,
+			[tx],
+			[input.signer, positionKeypair],
+		);
+		return {
+			position: positionKeypair.publicKey.toBase58(),
+			signature: signatures[0] ?? "",
+		};
+	});
+}

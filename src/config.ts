@@ -1,0 +1,151 @@
+import { PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
+import { Data, Effect } from "effect";
+
+export class ConfigError extends Data.TaggedError("ConfigError")<{
+	message: string;
+}> {}
+
+export interface BotConfig {
+	rpcUrl: string;
+	poolAddress: string;
+	positionAddress?: string;
+	slippageBps: number;
+	driftThresholdBins: number;
+	dryRun: boolean;
+	jupiterApiKey?: string;
+	secretKey: Uint8Array;
+}
+
+export type EnvSource = Record<string, string | undefined>;
+
+function fail(message: string): Effect.Effect<never, ConfigError> {
+	return Effect.fail(new ConfigError({ message }));
+}
+
+function required(
+	name: string,
+	env: EnvSource,
+): Effect.Effect<string, ConfigError> {
+	const value = env[name]?.trim();
+	if (!value) {
+		return fail(`missing required env var ${name}`);
+	}
+	return Effect.succeed(value);
+}
+
+function optional(name: string, env: EnvSource): string | undefined {
+	const value = env[name]?.trim();
+	return value ? value : undefined;
+}
+
+function parseIntVar(
+	name: string,
+	raw: string | undefined,
+	fallback: number,
+	min: number,
+	max: number,
+): Effect.Effect<number, ConfigError> {
+	if (raw === undefined || raw === "") {
+		return Effect.succeed(fallback);
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+		return fail(
+			`invalid ${name}: expected integer in [${min}, ${max}], got "${raw}"`,
+		);
+	}
+	return Effect.succeed(parsed);
+}
+
+function asPublicKey(
+	name: string,
+	raw: string,
+): Effect.Effect<PublicKey, ConfigError> {
+	try {
+		return Effect.succeed(new PublicKey(raw));
+	} catch {
+		return fail(`invalid ${name}: not a valid Solana address`);
+	}
+}
+
+function parseDryRun(
+	raw: string | undefined,
+): Effect.Effect<boolean, ConfigError> {
+	if (raw === undefined || raw === "") {
+		return Effect.succeed(true);
+	}
+	const normalized = raw.trim().toLowerCase();
+	if (normalized === "true" || normalized === "1" || normalized === "yes") {
+		return Effect.succeed(true);
+	}
+	if (normalized === "false" || normalized === "0" || normalized === "no") {
+		return Effect.succeed(false);
+	}
+	return fail(`invalid DRY_RUN: expected true/false, got "${raw}"`);
+}
+
+export function loadConfig(
+	env: EnvSource,
+): Effect.Effect<BotConfig, ConfigError> {
+	return Effect.gen(function* () {
+		const rpcUrl = yield* required("RPC_URL", env);
+		try {
+			const url = new URL(rpcUrl);
+			if (url.protocol !== "http:" && url.protocol !== "https:") {
+				return yield* fail("invalid RPC_URL: expected http(s) URL");
+			}
+		} catch {
+			return yield* fail("invalid RPC_URL: expected http(s) URL");
+		}
+
+		const poolRaw = yield* required("POOL_ADDRESS", env);
+		const poolKey = yield* asPublicKey("POOL_ADDRESS", poolRaw);
+
+		const positionRaw = optional("POSITION_ADDRESS", env);
+		let positionAddress: string | undefined;
+		if (positionRaw !== undefined) {
+			const positionKey = yield* asPublicKey("POSITION_ADDRESS", positionRaw);
+			positionAddress = positionKey.toBase58();
+		}
+
+		const privateRaw = yield* required("PRIVATE_KEY", env);
+		let secretKey: Uint8Array;
+		try {
+			secretKey = bs58.decode(privateRaw);
+		} catch {
+			return yield* fail("invalid PRIVATE_KEY: not valid bs58");
+		}
+		if (secretKey.length !== 64) {
+			return yield* fail("invalid PRIVATE_KEY: expected 64-byte secret key");
+		}
+
+		const slippageBps = yield* parseIntVar(
+			"SLIPPAGE_BPS",
+			optional("SLIPPAGE_BPS", env),
+			50,
+			0,
+			10_000,
+		);
+		const driftThresholdBins = yield* parseIntVar(
+			"DRIFT_THRESHOLD_BINS",
+			optional("DRIFT_THRESHOLD_BINS", env),
+			10,
+			0,
+			1024,
+		);
+		const dryRun = yield* parseDryRun(optional("DRY_RUN", env));
+		const jupiterApiKey = optional("JUPITER_API_KEY", env);
+
+		return {
+			rpcUrl,
+			poolAddress: poolKey.toBase58(),
+			positionAddress,
+			slippageBps,
+			driftThresholdBins,
+			dryRun,
+			jupiterApiKey,
+			secretKey,
+		} satisfies BotConfig;
+	});
+}

@@ -75,9 +75,7 @@ const OrderErrorFieldsSchema = Schema.Struct({
 });
 
 const decodeOrder = Schema.decodeUnknownSync(OrderResponseSchema);
-const decodeOrderErrorFields = Schema.decodeUnknownSync(
-	OrderErrorFieldsSchema,
-);
+const decodeOrderErrorFields = Schema.decodeUnknownSync(OrderErrorFieldsSchema);
 
 const ExecuteResponseSchema = Schema.Struct({
 	status: Schema.Literals(["Success", "Failed"]),
@@ -116,7 +114,8 @@ const orderFailureDetail = (json: unknown): string => {
 			parts.push(`router=${f.router.trim()}`);
 		if (f.mode !== undefined && f.mode.trim() !== "")
 			parts.push(`mode=${f.mode.trim()}`);
-		if (f.errorCode !== undefined) parts.push(`errorCode=${String(f.errorCode)}`);
+		if (f.errorCode !== undefined)
+			parts.push(`errorCode=${String(f.errorCode)}`);
 		if (f.errorMessage !== undefined && f.errorMessage.trim() !== "")
 			parts.push(`errorMessage=${f.errorMessage.trim()}`);
 		return parts.length > 0 ? ` (${parts.join(" ")})` : "";
@@ -174,9 +173,7 @@ export const parseJupiterOrderResponse = (
 	};
 };
 
-export const parseJupiterExecuteResponse = (
-	json: unknown,
-): JupiterExecuted => {
+export const parseJupiterExecuteResponse = (json: unknown): JupiterExecuted => {
 	let decoded: {
 		readonly status: "Success" | "Failed";
 		readonly signature?: string;
@@ -230,8 +227,6 @@ const swapErrorOf = (where: string, e: unknown): SwapError =>
 
 const JUPITER_V2_BASE_URL = "https://api.jup.ag/swap/v2";
 
-// why: the key must never enter git, so it is read at call time from the
-// process environment only and never logged or persisted.
 const jupiterAuthHeaders = (): Record<string, string> => {
 	const key = process.env.JUPITER_API_KEY?.trim();
 	return key ? { "x-api-key": key } : {};

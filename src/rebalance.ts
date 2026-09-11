@@ -1,5 +1,10 @@
 import type { StrategyType } from "@meteora-ag/dlmm";
 import {
+	createAssociatedTokenAccountInstruction,
+	createSyncNativeInstruction,
+	getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import {
 	type Connection,
 	type Keypair,
 	PublicKey,
@@ -8,11 +13,6 @@ import {
 	type TransactionInstruction,
 	VersionedTransaction,
 } from "@solana/web3.js";
-import {
-	createAssociatedTokenAccountInstruction,
-	createSyncNativeInstruction,
-	getAssociatedTokenAddressSync,
-} from "@solana/spl-token";
 import BN from "bn.js";
 import { Effect } from "effect";
 import type { BotConfig } from "./config.ts";
@@ -70,6 +70,7 @@ export interface BalancedPlanInputs {
 // purely from topUp, so a full haircut means zero redeposit from the position.
 const FULL_HAIRCUT_BPS = 10000;
 const MAX_BPS = 10000;
+const MIN_WIDTH_BINS = 3;
 const REBALANCE_ACTIVE_BIN_SLIPPAGE = 3;
 const NATIVE_MINT = "So11111111111111111111111111111111111111112";
 
@@ -88,14 +89,11 @@ const mustBaseUnit = (raw: string, name: string): BN => {
 	return new BN(raw);
 };
 
-// why: callers size the swap on totalX+feeX / totalY+feeY, so keep the raw
-// addition pure and offline-testable instead of burying it in the flow.
 export const addBaseUnits = (a: string, b: string): string =>
 	mustBaseUnit(a, "amount").add(mustBaseUnit(b, "amount")).toString();
 
 // why: COMPOUND_FEES=false leaves web-style fees claimed in the wallet, so the
-// topUp derived from the wallet delta must exclude them, floored at zero for
-// lamport dust. Pure and offline-testable; callers wrap deriveTopUp with it.
+// topUp derived from the wallet delta must exclude them, floored at zero.
 export const excludeFees = (
 	deltaBaseUnit: string,
 	feeBaseUnit: string,
@@ -144,14 +142,31 @@ export interface WalletSnapshot {
 	readonly y: string;
 }
 
+export const capTopUpToBalances = (args: {
+	readonly topUpX: string;
+	readonly topUpY: string;
+	readonly balanceX: string;
+	readonly balanceY: string;
+}): { readonly topUpX: string; readonly topUpY: string } => {
+	if (
+		mustBaseUnit(args.topUpX, "topUpX").gt(mustBaseUnit(args.balanceX, "balanceX")) ||
+		mustBaseUnit(args.topUpY, "topUpY").gt(mustBaseUnit(args.balanceY, "balanceY"))
+	) {
+		throw new DlmmError(
+			`topUp ${args.topUpX}/${args.topUpY} exceeds ATA balances ` +
+				`${args.balanceX}/${args.balanceY}, abort rebalance`,
+		);
+	}
+	return { topUpX: args.topUpX, topUpY: args.topUpY };
+};
+
 export interface ClaimedFees {
 	readonly feeX: string;
 	readonly feeY: string;
 }
 
 // why: recovery sizes from the wallet delta (current minus pre-withdraw
-// snapshot) instead of position totals, so dust cancels and the 50/50 math
-// sees the same principal the normal path sized from. Pure and offline-testable.
+// snapshot) instead of position totals, so dust cancels out.
 export const sizeFromWalletDelta = (args: {
 	readonly deltaX: string;
 	readonly deltaY: string;
@@ -163,12 +178,8 @@ export const sizeFromWalletDelta = (args: {
 	sizedY: args.compoundFees ? args.deltaY : excludeFees(args.deltaY, args.feeY),
 });
 
-// why: deposit accounting prefers the actual executed output, but /execute
-// may omit totals, so fall back to the order outAmount. Pure and offline-testable.
-export const actualSwapOut = (
-	totalOut: string,
-	orderOut: string,
-): string =>
+// why: /execute may omit totals, so fall back to the order outAmount.
+export const actualSwapOut = (totalOut: string, orderOut: string): string =>
 	/^\d+$/.test(totalOut) && totalOut !== "0" ? totalOut : orderOut;
 
 // why: width must survive snapshots taken while untracked, so fall back to a
@@ -186,7 +197,7 @@ export const resolveWidth = (
 	) {
 		return snapshotUpper - snapshotLower + 1;
 	}
-	return 3;
+	return MIN_WIDTH_BINS;
 };
 
 export const centerRange = (
@@ -365,8 +376,7 @@ const walletBalanceOf = async (
 	return total;
 };
 
-// Pure and offline-testable: how much native SOL may be wrapped to wSOL
-// after keeping the gas reserve untouched. Zero when below the reserve.
+// Wrap amount keeps the gas reserve native; zero at or below reserve.
 export const wrapAmountForReserve = (args: {
 	readonly nativeLamports: string;
 	readonly reserveLamports: number;
@@ -377,10 +387,7 @@ export const wrapAmountForReserve = (args: {
 	return native.sub(reserve).toString();
 };
 
-// why: the SOL leg of a withdraw lands as native SOL, but sizing only sees
-// ATAs. Wrap the withdraw proceeds into wSOL explicitly, keeping
-// solReserveLamports native at all times. Aborts when native is below the
-// reserve instead of limping into txs that run out of gas mid-flight.
+// Wrap withdraw proceeds to wSOL, keeping the reserve native; aborts below it.
 const wrapSolLeg = (
 	connection: Connection,
 	owner: Keypair,
@@ -458,8 +465,8 @@ const wrapSolLeg = (
 const toNum = (v: number | BN): number =>
 	typeof v === "number" ? v : v.toNumber();
 
-// why: the SDK centers the deposit on the live active bin with the old width,
-// so the box and logs show that true range instead of the manual guess.
+// why: the SDK centers the deposit on the live active bin, so show that
+// true range instead of the manual guess.
 const simulatedRange = (
 	response: SimulateResponse,
 	fallback: { readonly lowerBinId: number; readonly upperBinId: number },
@@ -544,7 +551,11 @@ export const previewBalancedPlan = (args: {
 					`preview simulate failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		}).pipe(
-			Effect.catch(() => Effect.succeed(null as SimulateResponse | null)),
+			Effect.catch((e) =>
+				Effect.sync(() =>
+					log("WARN", `preview simulate failed, using guessed range: ${e}`),
+				).pipe(Effect.as(null as SimulateResponse | null)),
+			),
 		);
 		if (!simulated) return withFees;
 		const range = simulatedRange(simulated, guessed);
@@ -610,11 +621,8 @@ export const logDryRunBalancedPlan = (
 		);
 	});
 
-// why: recovery after a withdraw-then-failed-swap must not withdraw again.
-// The position is already empty and alive, funds sit in the wallet, so this
-// resumes from the wallet snapshot: size from the wallet delta, Jupiter V2
-// order + execute, topUp from the delta, then the same in-place rebalance.
-// The normal path calls withdraw first and delegates here, keeping one flow.
+// why: recovery must not withdraw again: the position is already empty and
+// alive, funds sit in the wallet, so resume from the wallet snapshot.
 export const completeRebalanceFromWallet = (
 	ctx: RebalanceContext,
 	config: BotConfig,
@@ -634,7 +642,6 @@ export const completeRebalanceFromWallet = (
 		const tokenYMint = dlmm.tokenY.publicKey;
 		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
 
-		// 1. Live position (fee fallback) + active bin + current wallet.
 		// Explicit pre-withdraw fees win when the normal path provides them;
 		// a recovery re-read sees the emptied position (zero fees), so already
 		// claimed fees mixed in the wallet stay deposited unless the caller
@@ -654,9 +661,6 @@ export const completeRebalanceFromWallet = (
 				),
 		});
 
-		// 1b. The SOL leg of a withdraw lands as native SOL, invisible to
-		// ATA-only reads. Wrap proceeds into wSOL now, keeping the gas
-		// reserve native; aborts when gas is below the reserve.
 		if (
 			tokenXMint.toBase58() === NATIVE_MINT ||
 			tokenYMint.toBase58() === NATIVE_MINT
@@ -682,8 +686,6 @@ export const completeRebalanceFromWallet = (
 				),
 		});
 
-		// 2. Size the 50/50 plan from the wallet delta (dust cancels), same
-		// principal the normal path sized from position totals.
 		const rawDelta = deriveTopUp({
 			beforeX: walletBefore.x,
 			afterX: walletCurrentX.toString(),
@@ -713,9 +715,8 @@ export const completeRebalanceFromWallet = (
 			slippageBps: config.swapSlippageBps,
 		});
 
-		// 3. Jupiter Swap V2: order builds the unsigned tx, sign locally, then
-		// always POST /execute (never self-send: a winning jupiterz route needs
-		// the market-maker co-sign from /execute).
+		// Always POST /execute, never self-send: a winning jupiterz route
+		// needs the market-maker co-sign from /execute.
 		if (balancedPlan.swap.kind === "swap") {
 			const ordered = yield* getJupiterOrder({
 				inputMint: balancedPlan.swap.inputMint,
@@ -741,8 +742,6 @@ export const completeRebalanceFromWallet = (
 				signedTransactionB64,
 				requestId: ordered.requestId,
 			}).pipe(Effect.mapError(swapErrToDlmm));
-			// Deposit accounting uses the actual executed output; the wallet
-			// delta below captures it, this pins the number with order fallback.
 			const actualOut = actualSwapOut(
 				executed.totalOut,
 				ordered.order.outAmount,
@@ -784,18 +783,19 @@ export const completeRebalanceFromWallet = (
 		const topUpY = config.compoundFees
 			? rawTopUpY
 			: excludeFees(rawTopUpY, feeYStr);
-		// Defensive cap: topUp is a wallet delta and can never exceed what
-		// the ATAs hold now. This guarantees native SOL (gas) is never
-		// pulled into the deposit even if a read drifts.
-		if (
-			new BN(topUpX).gt(walletAfterX) ||
-			new BN(topUpY).gt(walletAfterY)
-		) {
-			return yield* dlmmFail(
-				`topUp ${topUpX}/${topUpY} exceeds ATA balances ` +
-					`${walletAfterX.toString()}/${walletAfterY.toString()}, abort rebalance`,
-			);
-		}
+		// A wallet delta can never exceed what the ATAs hold now; native SOL
+		// (gas) must never leak into the deposit even if a read drifts.
+		const capped = yield* Effect.try({
+			try: () =>
+				capTopUpToBalances({
+					topUpX,
+					topUpY,
+					balanceX: walletAfterX.toString(),
+					balanceY: walletAfterY.toString(),
+				}),
+			catch: (e) =>
+				e instanceof DlmmError ? e : new DlmmError(String(e)),
+		});
 		const emptied = yield* Effect.tryPromise({
 			try: () => dlmm.getPosition(positionAddress),
 			catch: (e) =>
@@ -809,8 +809,8 @@ export const completeRebalanceFromWallet = (
 					positionAddress,
 					emptied.positionData,
 					sdkStrategy,
-					new BN(topUpX),
-					new BN(topUpY),
+					new BN(capped.topUpX),
+					new BN(capped.topUpY),
 					new BN(FULL_HAIRCUT_BPS),
 					new BN(FULL_HAIRCUT_BPS),
 				),
@@ -881,9 +881,8 @@ export const executeRebalance = (
 		const tokenXMint = dlmm.tokenX.publicKey;
 		const tokenYMint = dlmm.tokenY.publicKey;
 
-		// 1. Read position for the withdraw range + pre-withdraw fees, then
-		// snapshot the wallet. Sizing moves to completeRebalanceFromWallet so a
-		// recovery can reuse it without withdrawing again.
+		// Sizing lives in completeRebalanceFromWallet so a recovery can reuse
+		// it without withdrawing again.
 		const lbPosition = yield* Effect.tryPromise({
 			try: () => dlmm.getPosition(positionAddress),
 			catch: (e) =>
@@ -938,9 +937,8 @@ export const executeRebalance = (
 			);
 		}
 
-		// 3. Resume from the wallet: sizing, Jupiter V2 swap, topUp, in-place
-		// rebalance. Same code a standalone recovery script calls, so the
-		// normal path and the recovery path cannot drift apart.
+		// One flow: the normal path withdraws above, then shares the
+		// wallet-resume below with recovery scripts.
 		yield* completeRebalanceFromWallet(
 			ctx,
 			config,

@@ -86,7 +86,10 @@ describe("parseJupiterOrderResponse", () => {
 
 	it("rejects a missing outAmount", () => {
 		const { outAmount: _dropped, ...rest } = orderOk();
-		expectSwapError(() => parseJupiterOrderResponse(rest, "1000"), "Jupiter order");
+		expectSwapError(
+			() => parseJupiterOrderResponse(rest, "1000"),
+			"Jupiter order",
+		);
 	});
 
 	it("rejects a non base-unit outAmount", () => {
@@ -109,7 +112,10 @@ describe("parseJupiterOrderResponse", () => {
 
 	it("rejects a missing requestId", () => {
 		const { requestId: _dropped, ...rest } = orderOk();
-		expectSwapError(() => parseJupiterOrderResponse(rest, "1000"), "Jupiter order");
+		expectSwapError(
+			() => parseJupiterOrderResponse(rest, "1000"),
+			"Jupiter order",
+		);
 	});
 });
 
@@ -137,7 +143,11 @@ describe("parseJupiterExecuteResponse", () => {
 			signature: "sig123",
 			code: 0,
 		});
-		expect(parsed).toEqual({ signature: "sig123", totalIn: "0", totalOut: "0" });
+		expect(parsed).toEqual({
+			signature: "sig123",
+			totalIn: "0",
+			totalOut: "0",
+		});
 	});
 
 	it("fails typed on Failed status", () => {

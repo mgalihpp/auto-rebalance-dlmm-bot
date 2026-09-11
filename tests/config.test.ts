@@ -51,14 +51,11 @@ describe("COMPOUND_FEES", () => {
 	});
 
 	it("defaults to false when empty", async () => {
-		await withEnv(
-			{ ...baseEnv, COMPOUND_FEES: undefined },
-			async () => {
-				delete process.env.COMPOUND_FEES;
-				const c = await runConfig();
-				expect(c.compoundFees).toBe(false);
-			},
-		);
+		await withEnv({ ...baseEnv, COMPOUND_FEES: undefined }, async () => {
+			delete process.env.COMPOUND_FEES;
+			const c = await runConfig();
+			expect(c.compoundFees).toBe(false);
+		});
 	});
 
 	it("rejects garbage with a typed ConfigError", async () => {

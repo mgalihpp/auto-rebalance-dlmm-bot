@@ -37,7 +37,10 @@ export const loadKeypair = (
 function parseSecretBytes(raw: string): Uint8Array {
 	if (raw.startsWith("[")) {
 		const arr = JSON.parse(raw) as unknown;
-		if (!Array.isArray(arr) || !arr.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+		if (
+			!Array.isArray(arr) ||
+			!arr.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
+		) {
 			throw new Error("JSON key must be an array of bytes (0-255)");
 		}
 		return Uint8Array.from(arr as number[]);

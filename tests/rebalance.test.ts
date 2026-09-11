@@ -2,12 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { Effect } from "effect";
 import { DlmmError } from "../src/dlmm.ts";
 import {
-	addBaseUnits,
 	actualSwapOut,
+	addBaseUnits,
 	type BalancedPlanInputs,
 	centerRange,
 	completeRebalanceFromWallet,
 	computeBalancedPlan,
+	capTopUpToBalances,
 	deriveTopUp,
 	excludeFees,
 	redepositAfterHaircut,
@@ -115,7 +116,6 @@ describe("computeBalancedPlan", () => {
 	});
 
 	it("sizes the swap on total+fee when compounding, principal-only otherwise", async () => {
-		// COMPOUND_FEES=true: caller passes total+fee "1200"/"0".
 		const compounded = addBaseUnits("1000", "200");
 		expect(compounded).toBe("1200");
 		const planCompound = await run(
@@ -171,8 +171,6 @@ describe("excludeFees", () => {
 	});
 
 	it("leaves the fee in the wallet when COMPOUND_FEES=false", () => {
-		// Wallet delta after withdraw+swap is 1200/700, fees are 200/100.
-		// Principal-only topUp keeps 200/100 untouched in the wallet.
 		const delta = deriveTopUp({
 			beforeX: "50",
 			afterX: "1250",
@@ -241,9 +239,6 @@ describe("completeRebalanceFromWallet split", () => {
 	});
 
 	it("recovery math: zero snapshot treats the full wallet as withdrawn", () => {
-		// Position [-1914,-1912] empty, funds parked in wallet after a
-		// withdraw-then-failed-swap. walletBefore zero means the whole
-		// current balance sizes the plan and the topUp.
 		const current = { x: "11814000000", y: "171000000" };
 		const delta = deriveTopUp({
 			beforeX: "0",
@@ -267,8 +262,6 @@ describe("completeRebalanceFromWallet split", () => {
 	});
 
 	it("normal math: wallet delta minus snapshot equals withdrawn principal", () => {
-		// Dust cancels: before already holds it, current holds dust +
-		// principal + claimed fees, so the delta is what the old path sized.
 		const delta = deriveTopUp({
 			beforeX: "50",
 			afterX: "1250",
@@ -337,5 +330,40 @@ describe("wrapAmountForReserve", () => {
 				reserveLamports: 20000000,
 			}),
 		).toBe("0");
+	});
+});
+
+describe("capTopUpToBalances", () => {
+	it("passes topUp within ATA balances through", () => {
+		expect(
+			capTopUpToBalances({
+				topUpX: "1000",
+				topUpY: "700",
+				balanceX: "1200",
+				balanceY: "700",
+			}),
+		).toEqual({ topUpX: "1000", topUpY: "700" });
+	});
+
+	it("throws when X exceeds the ATA balance", () => {
+		expect(() =>
+			capTopUpToBalances({
+				topUpX: "1201",
+				topUpY: "700",
+				balanceX: "1200",
+				balanceY: "700",
+			}),
+		).toThrow(DlmmError);
+	});
+
+	it("throws when Y exceeds the ATA balance", () => {
+		expect(() =>
+			capTopUpToBalances({
+				topUpX: "1000",
+				topUpY: "701",
+				balanceX: "1200",
+				balanceY: "700",
+			}),
+		).toThrow(DlmmError);
 	});
 });

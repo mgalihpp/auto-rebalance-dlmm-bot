@@ -68,8 +68,7 @@ export const shortMint = (mint: string): string => {
 	return `${mint.slice(0, 4)}...${mint.slice(-4)}`;
 };
 
-export const txLink = (sig: string): string =>
-	`https://solscan.io/tx/${sig}`;
+export const txLink = (sig: string): string => `https://solscan.io/tx/${sig}`;
 
 export type DryRunSwap =
 	| { readonly kind: "none" }

@@ -60,9 +60,7 @@ function parseStrategy(
 	if (name === "curve") return Effect.succeed("Curve");
 	if (name === "bidask" || name === "bid-ask" || name === "bid_ask")
 		return Effect.succeed("BidAsk");
-	return fail(
-		`STRATEGY must be Spot, Curve, or BidAsk, got "${raw}"`,
-	);
+	return fail(`STRATEGY must be Spot, Curve, or BidAsk, got "${raw}"`);
 }
 
 function parseDryRun(raw: string | undefined): boolean {

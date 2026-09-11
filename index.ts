@@ -1,8 +1,12 @@
 import DLMM from "@meteora-ag/dlmm";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, type Keypair, PublicKey } from "@solana/web3.js";
 import { Duration, Effect } from "effect";
 import { type BotConfig, type ConfigError, loadConfig } from "./src/config.ts";
-import { decide, type PositionSnapshot, type RebalancePlan } from "./src/decision.ts";
+import {
+	decide,
+	type PositionSnapshot,
+	type RebalancePlan,
+} from "./src/decision.ts";
 import { DlmmError, fetchSnapshot, loadKeypair } from "./src/dlmm.ts";
 import { log } from "./src/log.ts";
 import {
@@ -104,7 +108,8 @@ const oneCycle = (
 			} else {
 				const dlmm: InstanceType<typeof DLMM> | null = yield* Effect.tryPromise(
 					{
-						try: () => DLMM.create(connection, new PublicKey(config.poolAddress)),
+						try: () =>
+							DLMM.create(connection, new PublicKey(config.poolAddress)),
 						catch: (e) =>
 							new DlmmError(
 								`DLMM.create failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -126,9 +131,7 @@ const oneCycle = (
 						decision.plan,
 					).pipe(
 						Effect.catch((e: DlmmError) =>
-							Effect.sync(() =>
-								log("ERROR", `rebalance failed: ${e.message}`),
-							),
+							Effect.sync(() => log("ERROR", `rebalance failed: ${e.message}`)),
 						),
 					);
 				}

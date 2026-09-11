@@ -31,6 +31,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 meteora-llms-full.txt
 meteora-llms.txt
 
+# firecrawl research cache
+.firecrawl/
+
 # IntelliJ based IDEs
 .idea
 

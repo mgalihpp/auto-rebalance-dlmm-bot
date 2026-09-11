@@ -2,8 +2,8 @@
 
 Bun + TypeScript bot that auto-rebalances a Meteora DLMM liquidity position.
 Manual flow (Candidate A): claim fees → exit position → swap via Jupiter →
-re-enter a Curve position centered on the active bin. A drift gate, dry-run
-mode, and dust skip are grafted in from Candidate B.
+re-enter a Curve position centered on the active bin. Dry-run mode and dust
+skip are grafted in from Candidate B.
 
 To install dependencies:
 
@@ -20,11 +20,11 @@ RPC_URL=https://api.mainnet-beta.solana.com
 POOL_ADDRESS=<dlmm-pool-pubkey>
 PRIVATE_KEY=<bs58-secret-key>
 SLIPPAGE_BPS=50
-DRIFT_THRESHOLD_BINS=10
 DRY_RUN=true
 COMPOUND_FEES=true
 STRATEGY=Curve
 JUPITER_API_KEY=<optional>
+POLL_INTERVAL_MS=60000
 ```
 
 The bot is pool-scoped: it manages the funded position in POOL_ADDRESS (one instance per pool). Nothing needs updating after a rebalance. `STRATEGY` selects the DLMM liquidity shape (`Spot`, `Curve`, or
@@ -56,9 +56,10 @@ Slippage:        50 bps
 Dry run — no transactions sent.
 ```
 
-When the active bin drifts within `DRIFT_THRESHOLD_BINS` of the position edge
-(or leaves the range), the bot rebalances; otherwise it exits 0 with
-`Position in range ... no rebalance needed.` A single-sided position previews a
+The bot runs continuously, re-checking every `POLL_INTERVAL_MS` (default 60000).
+It rebalances only when the active bin leaves the position range; otherwise it
+logs `Position in range ... no rebalance needed.` and sleeps until the next
+check. A single-sided position previews a
 Jupiter leg instead, e.g. `Swaps required:  X -> Y amount=500000 minOut=497500 (Jupiter)`.
 
 ## Verify

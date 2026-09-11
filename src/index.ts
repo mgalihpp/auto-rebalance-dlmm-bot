@@ -56,65 +56,91 @@ function printPreview(
 	console.log(`Slippage:        ${plan.slippageBps} bps`);
 }
 
-const main = Effect.gen(function* () {
-	const botConfig = yield* loadConfig(process.env);
-	const connection = new Connection(botConfig.rpcUrl, "confirmed");
-	const signer = Keypair.fromSecretKey(botConfig.secretKey);
+let stopped = false;
+let wake: (() => void) | undefined;
 
-	const state = yield* loadPositionState({
-		connection,
-		poolAddress: botConfig.poolAddress,
-		owner: signer.publicKey,
-	});
-	const snapshot = state.snapshot;
+function requestShutdown() {
+	console.log("Shutting down...");
+	stopped = true;
+	wake?.();
+}
 
-	if (
-		!shouldRebalance(
-			snapshot.activeBinId,
-			snapshot.lowerBinId,
-			snapshot.upperBinId,
-			botConfig.driftThresholdBins,
-		)
-	) {
-		console.log(
-			`Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
-		);
-		return;
-	}
+process.on("SIGINT", requestShutdown);
+process.on("SIGTERM", requestShutdown);
 
-	const plan = yield* buildRebalancePlan(snapshot, {
-		slippageBps: botConfig.slippageBps,
-		compoundFees: botConfig.compoundFees,
-		strategy: botConfig.strategy,
-	});
-	printPreview(plan, {
-		lowerBinId: snapshot.lowerBinId,
-		upperBinId: snapshot.upperBinId,
-	});
-	if (!botConfig.compoundFees) {
-		console.log("Fees: excluded from redeposit (COMPOUND_FEES=false)");
-	}
-
-	if (botConfig.dryRun) {
-		console.log("Dry run — no transactions sent.");
-		return;
-	}
-
-	yield* executeRebalance({
-		connection,
-		dlmm: state.dlmm,
-		signer,
-		position: state.position,
-		plan,
-		slippageBps: botConfig.slippageBps,
-		jupiterApiKey: botConfig.jupiterApiKey,
-	});
-});
-
-Effect.runPromise(main).then(
-	() => process.exit(0),
-	(error) => {
+const botConfig = await Effect.runPromise(loadConfig(process.env)).catch(
+	(error): never => {
 		console.error("Rebalance failed:", error);
 		process.exit(1);
 	},
 );
+const connection = new Connection(botConfig.rpcUrl, "confirmed");
+const signer = Keypair.fromSecretKey(botConfig.secretKey);
+
+function runIteration() {
+	return Effect.gen(function* () {
+		const state = yield* loadPositionState({
+			connection,
+			poolAddress: botConfig.poolAddress,
+			owner: signer.publicKey,
+		});
+		const snapshot = state.snapshot;
+
+		if (
+			!shouldRebalance(
+				snapshot.activeBinId,
+				snapshot.lowerBinId,
+				snapshot.upperBinId,
+			)
+		) {
+			console.log(
+				`Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
+			);
+			return;
+		}
+
+		const plan = yield* buildRebalancePlan(snapshot, {
+			slippageBps: botConfig.slippageBps,
+			compoundFees: botConfig.compoundFees,
+			strategy: botConfig.strategy,
+		});
+		printPreview(plan, {
+			lowerBinId: snapshot.lowerBinId,
+			upperBinId: snapshot.upperBinId,
+		});
+		if (!botConfig.compoundFees) {
+			console.log("Fees: excluded from redeposit (COMPOUND_FEES=false)");
+		}
+
+		if (botConfig.dryRun) {
+			console.log("Dry run — no transactions sent.");
+			return;
+		}
+
+		yield* executeRebalance({
+			connection,
+			dlmm: state.dlmm,
+			signer,
+			position: state.position,
+			plan,
+			slippageBps: botConfig.slippageBps,
+			jupiterApiKey: botConfig.jupiterApiKey,
+		});
+	});
+}
+
+while (!stopped) {
+	try {
+		await Effect.runPromise(runIteration());
+	} catch (error) {
+		console.error("Rebalance failed:", error);
+	}
+	if (stopped) {
+		break;
+	}
+	await new Promise<void>((resolve) => {
+		wake = resolve;
+		setTimeout(resolve, botConfig.pollIntervalMs);
+	});
+	wake = undefined;
+}

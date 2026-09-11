@@ -1,0 +1,47 @@
+import { describe, expect, test } from "bun:test";
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
+import { Effect } from "effect";
+import { ConfigError, type EnvSource, loadConfig } from "../src/config.ts";
+
+function makeEnv(overrides?: EnvSource): EnvSource {
+	return {
+		RPC_URL: "https://api.mainnet-beta.solana.com",
+		POOL_ADDRESS: Keypair.generate().publicKey.toBase58(),
+		PRIVATE_KEY: bs58.encode(Keypair.generate().secretKey),
+		...overrides,
+	};
+}
+
+async function loadFailure(env: EnvSource): Promise<unknown> {
+	try {
+		await Effect.runPromise(loadConfig(env));
+	} catch (error) {
+		return error;
+	}
+	return expect.unreachable();
+}
+
+describe("loadConfig poll interval", () => {
+	test("defaults to 60000 when unset", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.pollIntervalMs).toBe(60000);
+	});
+
+	test("accepts a valid custom value", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(makeEnv({ POLL_INTERVAL_MS: "10000" })),
+		);
+		expect(config.pollIntervalMs).toBe(10000);
+	});
+
+	test("rejects below-min with ConfigError", async () => {
+		const error = await loadFailure(makeEnv({ POLL_INTERVAL_MS: "1000" }));
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("rejects non-integer with ConfigError", async () => {
+		const error = await loadFailure(makeEnv({ POLL_INTERVAL_MS: "abc" }));
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});

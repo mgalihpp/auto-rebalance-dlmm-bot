@@ -45,17 +45,17 @@ describe("rangeForActiveBin", () => {
 
 describe("shouldRebalance", () => {
 	test("stays put when centered", () => {
-		expect(shouldRebalance(1000, 966, 1034, 10)).toBe(false);
+		expect(shouldRebalance(1000, 966, 1034)).toBe(false);
 	});
 
-	test("fires near the edge", () => {
-		expect(shouldRebalance(970, 966, 1034, 10)).toBe(true);
-		expect(shouldRebalance(1030, 966, 1034, 10)).toBe(true);
+	test("stays put near the edge", () => {
+		expect(shouldRebalance(970, 966, 1034)).toBe(false);
+		expect(shouldRebalance(1030, 966, 1034)).toBe(false);
 	});
 
 	test("fires outside the range", () => {
-		expect(shouldRebalance(900, 966, 1034, 10)).toBe(true);
-		expect(shouldRebalance(1100, 966, 1034, 10)).toBe(true);
+		expect(shouldRebalance(900, 966, 1034)).toBe(true);
+		expect(shouldRebalance(1100, 966, 1034)).toBe(true);
 	});
 });
 

@@ -11,12 +11,12 @@ export interface BotConfig {
 	rpcUrl: string;
 	poolAddress: string;
 	slippageBps: number;
-	driftThresholdBins: number;
 	dryRun: boolean;
 	compoundFees: boolean;
 	strategy: StrategyKind;
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
+	pollIntervalMs: number;
 }
 
 export type EnvSource = Record<string, string | undefined>;
@@ -149,13 +149,6 @@ export function loadConfig(
 			0,
 			10_000,
 		);
-		const driftThresholdBins = yield* parseIntVar(
-			"DRIFT_THRESHOLD_BINS",
-			optional("DRIFT_THRESHOLD_BINS", env),
-			10,
-			0,
-			1024,
-		);
 		const dryRun = yield* parseBoolVar(
 			"DRY_RUN",
 			optional("DRY_RUN", env),
@@ -172,17 +165,24 @@ export function loadConfig(
 			"Curve",
 		);
 		const jupiterApiKey = optional("JUPITER_API_KEY", env);
+		const pollIntervalMs = yield* parseIntVar(
+			"POLL_INTERVAL_MS",
+			optional("POLL_INTERVAL_MS", env),
+			60000,
+			5000,
+			3600000,
+		);
 
 		return {
 			rpcUrl,
 			poolAddress: poolKey.toBase58(),
 			slippageBps,
-			driftThresholdBins,
 			dryRun,
 			compoundFees,
 			strategy,
 			jupiterApiKey,
 			secretKey,
+			pollIntervalMs,
 		} satisfies BotConfig;
 	});
 }

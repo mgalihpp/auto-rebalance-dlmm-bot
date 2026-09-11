@@ -91,16 +91,8 @@ export function shouldRebalance(
 	activeBinId: number,
 	lowerBinId: number,
 	upperBinId: number,
-	threshold: number,
 ): boolean {
-	if (activeBinId < lowerBinId || activeBinId > upperBinId) {
-		return true;
-	}
-	const distanceToEdge = Math.min(
-		activeBinId - lowerBinId,
-		upperBinId - activeBinId,
-	);
-	return distanceToEdge <= threshold;
+	return activeBinId < lowerBinId || activeBinId > upperBinId;
 }
 
 function applySlippage(inAmount: BN, slippageBps: number): BN {

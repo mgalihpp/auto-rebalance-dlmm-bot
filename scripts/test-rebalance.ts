@@ -32,7 +32,6 @@ const main = Effect.gen(function* () {
 		connection,
 		poolAddress: botConfig.poolAddress,
 		owner: signer.publicKey,
-		positionAddress: botConfig.positionAddress,
 	});
 	const snapshot = state.snapshot;
 	console.log(

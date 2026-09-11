@@ -27,26 +27,6 @@ function fake(
 }
 
 describe("resolvePosition", () => {
-	test("returns the pinned position when it exists", () => {
-		const a = fake("A", { totalXAmount: "100", totalYAmount: 0 });
-		const b = fake("B", { totalXAmount: new BN(50), totalYAmount: "50" });
-		expect(resolvePosition([a, b], "B")).toBe(b);
-	});
-
-	test("throws naming the address and count when the pin is missing", () => {
-		const candidates = [fake("A", { totalXAmount: "100" })];
-		try {
-			resolvePosition(candidates, "StaleAddress111111111111111111111111111");
-			expect.unreachable();
-		} catch (error) {
-			expect(error).toBeInstanceOf(DlmmError);
-			const message = (error as DlmmError).message;
-			expect(message).toContain("StaleAddress111111111111111111111111111");
-			expect(message).toContain("1 position(s)");
-			expect(message).toContain("unset POSITION_ADDRESS");
-		}
-	});
-
 	test("throws no-position error when there are no candidates", () => {
 		try {
 			resolvePosition([]);
@@ -89,7 +69,8 @@ describe("resolvePosition", () => {
 			const message = (error as DlmmError).message;
 			expect(message).toContain("A");
 			expect(message).toContain("B");
-			expect(message).toContain("POSITION_ADDRESS");
+			expect(message).toContain("one bot instance per pool");
+			expect(message).toContain("withdraw the extra position");
 		}
 	});
 });

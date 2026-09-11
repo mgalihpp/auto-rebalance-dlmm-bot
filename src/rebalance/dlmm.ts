@@ -51,15 +51,7 @@ function isFunded(candidate: PositionCandidate): boolean {
 
 export function resolvePosition<T extends PositionCandidate>(
 	candidates: T[],
-	wanted?: string,
 ): T {
-	if (wanted) {
-		const found = candidates.find((c) => c.publicKey.toBase58() === wanted);
-		if (found !== undefined) return found;
-		throw new DlmmError({
-			message: `pinned position ${wanted} not found among ${candidates.length} position(s) in this pool; it may have been closed by a prior rebalance — unset POSITION_ADDRESS to auto-select the funded position`,
-		});
-	}
 	if (candidates.length === 0) {
 		throw new DlmmError({
 			message: "no DLMM position found for owner in this pool",
@@ -81,7 +73,7 @@ export function resolvePosition<T extends PositionCandidate>(
 		return pick;
 	}
 	throw new DlmmError({
-		message: `multiple funded positions found in this pool: ${funded.map((c) => c.publicKey.toBase58()).join(", ")}; pin one via POSITION_ADDRESS`,
+		message: `multiple funded positions found in this pool: ${funded.map((c) => c.publicKey.toBase58()).join(", ")}; run one bot instance per pool or withdraw the extra position`,
 	});
 }
 
@@ -89,7 +81,6 @@ export interface LoadStateInput {
 	connection: Connection;
 	poolAddress: string;
 	owner: PublicKey;
-	positionAddress?: string;
 }
 
 export interface LoadedState {
@@ -173,40 +164,14 @@ export function loadPositionState(
 			catch: toDlmmError,
 		});
 
-		let position: LbPosition | undefined;
-		if (input.positionAddress) {
-			const wanted = input.positionAddress;
-			if (userPositions.some((p) => p.publicKey.toBase58() === wanted)) {
-				position = yield* Effect.try({
-					try: () => resolvePosition(userPositions, wanted),
-					catch: (error) =>
-						error instanceof DlmmError ? error : toDlmmError(error),
-				});
-			} else {
-				// A prior rebalance closes the old position, so a stale pin may still resolve on-chain.
-				position = yield* Effect.tryPromise({
-					try: () => dlmm.getPosition(new PublicKey(wanted)),
-					catch: toDlmmError,
-				});
-			}
-		} else {
-			const selected = yield* Effect.try({
-				try: () => resolvePosition(userPositions),
-				catch: (error) =>
-					error instanceof DlmmError ? error : toDlmmError(error),
-			});
-			console.log(
-				`Auto-selected position ${selected.publicKey.toBase58()} (${userPositions.length} position(s) in pool)`,
-			);
-			position = selected;
-		}
-		if (position === undefined) {
-			return yield* Effect.fail(
-				new DlmmError({
-					message: "no DLMM position found for owner in this pool",
-				}),
-			);
-		}
+		const position = yield* Effect.try({
+			try: () => resolvePosition(userPositions),
+			catch: (error) =>
+				error instanceof DlmmError ? error : toDlmmError(error),
+		});
+		console.log(
+			`Auto-selected position ${position.publicKey.toBase58()} (${userPositions.length} position(s) in pool)`,
+		);
 
 		const data = position.positionData;
 		let activeBinPrice = activeBin.price;

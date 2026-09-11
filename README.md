@@ -18,7 +18,6 @@ Copy `.env.example` to `.env` and fill in values (never commit `.env`):
 ```bash
 RPC_URL=https://api.mainnet-beta.solana.com
 POOL_ADDRESS=<dlmm-pool-pubkey>
-POSITION_ADDRESS=<optional-position-pubkey>
 PRIVATE_KEY=<bs58-secret-key>
 SLIPPAGE_BPS=50
 DRIFT_THRESHOLD_BINS=10
@@ -28,9 +27,7 @@ STRATEGY=Curve
 JUPITER_API_KEY=<optional>
 ```
 
-`POSITION_ADDRESS` is optional; when unset the bot auto-selects the funded
-position in the pool, so it never needs updating after a rebalance (each
-rebalance closes the old position and opens a new one). `STRATEGY` selects the DLMM liquidity shape (`Spot`, `Curve`, or
+The bot is pool-scoped: it manages the funded position in POOL_ADDRESS (one instance per pool). Nothing needs updating after a rebalance. `STRATEGY` selects the DLMM liquidity shape (`Spot`, `Curve`, or
 `BidAsk`; default `Curve`). `DRY_RUN=true` prints the preview below and exits without sending
 transactions. `COMPOUND_FEES=false` withdraws fees to the wallet on exit but
 excludes them from the redeposit targets (default `true` reinvests them). The new Curve range always follows the original position width,

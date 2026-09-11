@@ -10,7 +10,6 @@ export class ConfigError extends Data.TaggedError("ConfigError")<{
 export interface BotConfig {
 	rpcUrl: string;
 	poolAddress: string;
-	positionAddress?: string;
 	slippageBps: number;
 	driftThresholdBins: number;
 	dryRun: boolean;
@@ -132,13 +131,6 @@ export function loadConfig(
 		const poolRaw = yield* required("POOL_ADDRESS", env);
 		const poolKey = yield* asPublicKey("POOL_ADDRESS", poolRaw);
 
-		const positionRaw = optional("POSITION_ADDRESS", env);
-		let positionAddress: string | undefined;
-		if (positionRaw !== undefined) {
-			const positionKey = yield* asPublicKey("POSITION_ADDRESS", positionRaw);
-			positionAddress = positionKey.toBase58();
-		}
-
 		const privateRaw = yield* required("PRIVATE_KEY", env);
 		let secretKey: Uint8Array;
 		try {
@@ -184,7 +176,6 @@ export function loadConfig(
 		return {
 			rpcUrl,
 			poolAddress: poolKey.toBase58(),
-			positionAddress,
 			slippageBps,
 			driftThresholdBins,
 			dryRun,

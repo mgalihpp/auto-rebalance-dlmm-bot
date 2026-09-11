@@ -1,6 +1,7 @@
 import type { StrategyType } from "@meteora-ag/dlmm";
 import {
 	createAssociatedTokenAccountInstruction,
+	createCloseAccountInstruction,
 	createSyncNativeInstruction,
 	getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
@@ -34,7 +35,6 @@ import {
 	pickTipAccount,
 	pollBundleStatus,
 	sendBundle as sendJitoBundle,
-	simulateBundle as simulateJitoBundle,
 } from "./jito.ts";
 import { formatDryRunBox, log, paint, txLink } from "./log.ts";
 import {
@@ -407,6 +407,27 @@ export const wrapAmountAboveFloor = (args: {
 
 const TX_FEE_BUFFER_LAMPORTS = 1_000_000;
 
+// why: Jupiter Ultra reads a So111 input from NATIVE (wrapping it inside its
+// own transaction) and rejects the order when native is short — while the
+// DLMM deposit needs wSOL in the ATA. So the native pile splits three ways:
+// floor stays untouched, solNeed stays native for Jupiter, the rest wraps.
+// A nonzero shortfall means the caller must unwrap wSOL first (or abort).
+export const splitNativeForSwap = (args: {
+	readonly nativeLamports: string;
+	readonly floorLamports: string;
+	readonly solNeedLamports: string;
+}): { readonly wrapAmount: string; readonly shortfall: string } => {
+	const native = mustBaseUnit(args.nativeLamports, "native");
+	const floor = mustBaseUnit(args.floorLamports, "floor");
+	const need = mustBaseUnit(args.solNeedLamports, "solNeed");
+	const over = native.sub(floor);
+	if (over.isNeg() || over.isZero())
+		return { wrapAmount: "0", shortfall: need.toString() };
+	if (need.gt(over))
+		return { wrapAmount: "0", shortfall: need.sub(over).toString() };
+	return { wrapAmount: over.sub(need).toString(), shortfall: "0" };
+};
+
 const wrapSolLeg = (
 	connection: Connection,
 	owner: Keypair,
@@ -671,15 +692,18 @@ export const completeRebalanceFromWallet = (
 		const involvesSol =
 			tokenXMint.toBase58() === NATIVE_MINT ||
 			tokenYMint.toBase58() === NATIVE_MINT;
-		const maybeWrapSolLeg = (): Effect.Effect<void, DlmmError> =>
-			involvesSol
-				? wrapSolLeg(
-						connection,
-						owner,
-						floorLamports,
-						config.solReserveLamports,
-					)
-				: Effect.void;
+		const solIsX = tokenXMint.toBase58() === NATIVE_MINT;
+		const wsolAta = getAssociatedTokenAddressSync(
+			new PublicKey(NATIVE_MINT),
+			owner.publicKey,
+		);
+		const readNative: Effect.Effect<number, DlmmError> = Effect.tryPromise({
+			try: () => connection.getBalance(owner.publicKey),
+			catch: (e) =>
+				new DlmmError(
+					`native SOL read failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
 
 		// Explicit pre-withdraw fees win when the normal path provides them;
 		// a recovery re-read sees the emptied position (zero fees), so already
@@ -700,7 +724,17 @@ export const completeRebalanceFromWallet = (
 				),
 		});
 
-		yield* maybeWrapSolLeg();
+		let native = yield* readNative;
+		if (native < config.solReserveLamports) {
+			return yield* dlmmFail(
+				`native SOL ${(native / 1e9).toFixed(6)} below reserve ` +
+					`${(config.solReserveLamports / 1e9).toFixed(6)}: top up gas, abort rebalance`,
+			);
+		}
+		// The SOL side lives half-wrapped: wSOL in the ATA plus native above
+		// the floor. Fold both into sizing so the plan sees the full leg.
+		const overFloor =
+			native > floorLamports ? String(native - floorLamports) : "0";
 		const feeXStr =
 			claimedFees?.feeX ?? livePosition.positionData.feeX.toString();
 		const feeYStr =
@@ -727,8 +761,13 @@ export const completeRebalanceFromWallet = (
 			afterY: walletCurrentY.toString(),
 		});
 		const { sizedX, sizedY } = sizeFromWalletDelta({
-			deltaX: rawDelta.topUpX,
-			deltaY: rawDelta.topUpY,
+			deltaX: solIsX
+				? addBaseUnits(rawDelta.topUpX, overFloor)
+				: rawDelta.topUpX,
+			deltaY:
+				!solIsX && involvesSol
+					? addBaseUnits(rawDelta.topUpY, overFloor)
+					: rawDelta.topUpY,
 			feeX: feeXStr,
 			feeY: feeYStr,
 			compoundFees: config.compoundFees,
@@ -748,6 +787,56 @@ export const completeRebalanceFromWallet = (
 			activePrice: active.price,
 			slippageBps: config.swapSlippageBps,
 		});
+
+		// Jupiter funds a So111 input from native, so leave its need unwrapped;
+		// wrap the rest for the deposit. Unwrap once when native is short —
+		// the need never exceeds the sized SOL side, so one unwrap covers it.
+		const solNeed =
+			involvesSol &&
+			balancedPlan.swap.kind === "swap" &&
+			balancedPlan.swap.inputMint === NATIVE_MINT
+				? balancedPlan.swap.inAmount
+				: "0";
+		const split = splitNativeForSwap({
+			nativeLamports: String(native),
+			floorLamports: String(floorLamports),
+			solNeedLamports: solNeed,
+		});
+		if (split.shortfall !== "0") {
+			const wsolBal = solIsX ? walletCurrentX : walletCurrentY;
+			if (!involvesSol || wsolBal.isZero()) {
+				return yield* dlmmFail(
+					`native SOL ${(native / 1e9).toFixed(6)} below Jupiter need ` +
+						`${(Number(solNeed) / 1e9).toFixed(6)}, abort rebalance`,
+				);
+			}
+			const unwrapSig = yield* Effect.tryPromise({
+				try: () =>
+					sendInstructions(connection, owner, [
+						createCloseAccountInstruction(
+							wsolAta,
+							owner.publicKey,
+							owner.publicKey,
+						),
+					]),
+				catch: (e) =>
+					new DlmmError(
+						`unwrap wSOL failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			yield* Effect.sync(() =>
+				log("LIVE", `unwrap wSOL -> native ${unwrapSig} ${txLink(unwrapSig)}`),
+			);
+			native = yield* readNative;
+		}
+		if (involvesSol) {
+			yield* wrapSolLeg(
+				connection,
+				owner,
+				floorLamports + Number(solNeed),
+				config.solReserveLamports,
+			);
+		}
 
 		// Always POST /execute, never self-send: a winning jupiterz route
 		// needs the market-maker co-sign from /execute.
@@ -790,8 +879,15 @@ export const completeRebalanceFromWallet = (
 		}
 
 		// Jupiter pays the SOL leg as native and closes the wSOL ATA; re-wrap
-		// it before the topUp read.
-		yield* maybeWrapSolLeg();
+		// it before the topUp read. No swap follows, so wrap all above floor.
+		if (involvesSol) {
+			yield* wrapSolLeg(
+				connection,
+				owner,
+				floorLamports,
+				config.solReserveLamports,
+			);
+		}
 		const walletAfterX = yield* readWalletLeg(
 			connection,
 			owner.publicKey,
@@ -1042,7 +1138,7 @@ export const attemptPostWithdrawBundle = (
 					`${(config.solReserveLamports / 1e9).toFixed(6)}: top up gas, abort rebalance`,
 			);
 		}
-		const wrapAmount = needsWrap
+		const overFloor = needsWrap
 			? wrapAmountAboveFloor({
 					nativeLamports: String(native),
 					floorLamports: String(floorLamports),
@@ -1054,6 +1150,7 @@ export const attemptPostWithdrawBundle = (
 		// sketches from pre-withdraw position totals since nothing landed.
 		let sizedX: string;
 		let sizedY: string;
+		let wsolBal = "0";
 		if (config.dryRun) {
 			const prePosition = yield* Effect.tryPromise({
 				try: () => dlmm.getPosition(positionAddress),
@@ -1099,9 +1196,10 @@ export const attemptPostWithdrawBundle = (
 			});
 			sizedX = sized.sizedX;
 			sizedY = sized.sizedY;
-			if (wrapAmount !== "0") {
-				if (solIsX) sizedX = addBaseUnits(sizedX, wrapAmount);
-				else sizedY = addBaseUnits(sizedY, wrapAmount);
+			wsolBal = (solIsX ? walletCurrentX : walletCurrentY).toString();
+			if (overFloor !== "0") {
+				if (solIsX) sizedX = addBaseUnits(sizedX, overFloor);
+				else sizedY = addBaseUnits(sizedY, overFloor);
 			}
 		}
 		const active = yield* Effect.tryPromise({
@@ -1130,7 +1228,7 @@ export const attemptPostWithdrawBundle = (
 		if (config.dryRun) {
 			const legs = [
 				"withdraw (sequential first)",
-				...(wrapAmount !== "0" ? ["wrap?"] : []),
+				...(overFloor !== "0" ? ["wrap?"] : []),
 				...(balancedPlan.swap.kind === "swap"
 					? [
 							`swap(signed) in=${balancedPlan.swap.inAmount} minOut=${balancedPlan.swap.outAmountMin} (quote needs landed withdraw, skipped)`,
@@ -1157,11 +1255,62 @@ export const attemptPostWithdrawBundle = (
 				),
 		});
 		const preLegs: BundleLeg[] = [];
-		if (wrapAmount !== "0") {
-			const wsolAta = getAssociatedTokenAddressSync(
-				new PublicKey(NATIVE_MINT),
-				owner.publicKey,
-			);
+		const wsolAta = getAssociatedTokenAddressSync(
+			new PublicKey(NATIVE_MINT),
+			owner.publicKey,
+		);
+		// Jupiter funds a So111 input from native: leave its need unwrapped,
+		// wrap the rest. Unwrap first as a leg when native is short — the
+		// need never exceeds the sized SOL side, so one unwrap covers it.
+		const solNeed =
+			balancedPlan.swap.kind === "swap" &&
+			balancedPlan.swap.inputMint === NATIVE_MINT
+				? balancedPlan.swap.inAmount
+				: "0";
+		let finalWrap = "0";
+		if (needsWrap) {
+			const split = splitNativeForSwap({
+				nativeLamports: String(native),
+				floorLamports: String(floorLamports),
+				solNeedLamports: solNeed,
+			});
+			if (split.shortfall !== "0") {
+				if (wsolBal === "0") {
+					return yield* dlmmFail(
+						`native SOL ${(native / 1e9).toFixed(6)} below Jupiter need ` +
+							`${(Number(solNeed) / 1e9).toFixed(6)}, fallback to sequential`,
+					);
+				}
+				preLegs.push({
+					label: "unwrap",
+					txB64: yield* signLegacyB64(
+						new Transaction().add(
+							createCloseAccountInstruction(
+								wsolAta,
+								owner.publicKey,
+								owner.publicKey,
+							),
+						),
+						owner,
+						blockhash,
+					),
+				});
+				const afterUnwrap = splitNativeForSwap({
+					nativeLamports: addBaseUnits(String(native), wsolBal),
+					floorLamports: String(floorLamports),
+					solNeedLamports: solNeed,
+				});
+				if (afterUnwrap.shortfall !== "0") {
+					return yield* dlmmFail(
+						"wSOL unwrap cannot cover Jupiter need, fallback to sequential",
+					);
+				}
+				finalWrap = afterUnwrap.wrapAmount;
+			} else {
+				finalWrap = split.wrapAmount;
+			}
+		}
+		if (finalWrap !== "0") {
 			const ata = yield* Effect.tryPromise({
 				try: () => connection.getAccountInfo(wsolAta),
 				catch: (e) =>
@@ -1184,7 +1333,7 @@ export const attemptPostWithdrawBundle = (
 				SystemProgram.transfer({
 					fromPubkey: owner.publicKey,
 					toPubkey: wsolAta,
-					lamports: BigInt(wrapAmount),
+					lamports: BigInt(finalWrap),
 				}),
 				createSyncNativeInstruction(wsolAta),
 			);
@@ -1321,13 +1470,9 @@ export const attemptPostWithdrawBundle = (
 		});
 
 		const txB64s = bundlePlan.legs.map((l) => l.txB64);
-		yield* simulateJitoBundle({
-			blockEngineUrl: config.jitoBlockEngineUrl,
-			transactions: txB64s,
-		}).pipe(Effect.mapError(jitoToDlmm));
-		yield* Effect.sync(() =>
-			log("LIVE", `jito bundle simulated ok (${txB64s.length} txs)`),
-		);
+		// No simulate step: simulateBundle is a QuickNode-proxy method, the
+		// real engine answers Invalid method. The bundle is atomic, so a bad
+		// bundle lands nothing and the poll below routes to the fallback.
 		const bundleId = yield* sendJitoBundle({
 			blockEngineUrl: config.jitoBlockEngineUrl,
 			transactions: txB64s,

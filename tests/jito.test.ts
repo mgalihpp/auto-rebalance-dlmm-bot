@@ -6,7 +6,6 @@ import {
 	JitoError,
 	parseInflightStatusResponse,
 	parseSendBundleResponse,
-	parseSimulateBundleResponse,
 	parseTipAccountsResponse,
 	pickTipAccount,
 } from "../src/jito.ts";
@@ -80,42 +79,6 @@ describe("parseSendBundleResponse", () => {
 		expectJitoError(
 			() => parseSendBundleResponse({ result: "" }),
 			"empty bundle",
-		);
-	});
-});
-
-describe("parseSimulateBundleResponse", () => {
-	it("accepts a succeeded summary", () => {
-		expect(
-			parseSimulateBundleResponse({ value: { summary: "succeeded" } }),
-		).toBeUndefined();
-		expect(
-			parseSimulateBundleResponse({
-				result: { value: { summary: "succeeded" } },
-			}),
-		).toBeUndefined();
-	});
-
-	it("accepts payloads without a summary when no error is set", () => {
-		expect(
-			parseSimulateBundleResponse({ result: { value: {} } }),
-		).toBeUndefined();
-	});
-
-	it("fails on RPC error fields", () => {
-		expectJitoError(
-			() => parseSimulateBundleResponse({ error: { code: -32001 } }),
-			"simulateBundle failed",
-		);
-	});
-
-	it("fails on a failed summary", () => {
-		expectJitoError(
-			() =>
-				parseSimulateBundleResponse({
-					value: { summary: { failed: { error: "nope" } } },
-				}),
-			"simulateBundle failed",
 		);
 	});
 });

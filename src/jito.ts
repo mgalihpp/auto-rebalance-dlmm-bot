@@ -30,7 +30,6 @@ export interface BundlePlan {
 
 export type BundleStatus =
 	| { readonly _tag: "Built" }
-	| { readonly _tag: "SimulatedOk" }
 	| { readonly _tag: "Sent"; readonly bundleId: string }
 	| { readonly _tag: "Landed"; readonly slot: number | null }
 	| { readonly _tag: "Failed"; readonly reason: string }
@@ -151,25 +150,6 @@ export const parseSendBundleResponse = (json: unknown): string => {
 const isRecord = (v: unknown): v is Record<string, unknown> =>
 	typeof v === "object" && v !== null;
 
-export const parseSimulateBundleResponse = (json: unknown): void => {
-	if (isRecord(json) && json.error !== undefined && json.error !== null) {
-		throw new JitoError(
-			`simulateBundle failed: ${JSON.stringify(json.error).slice(0, 300)}`,
-		);
-	}
-	const payload: unknown =
-		isRecord(json) && "result" in json ? json.result : json;
-	const value: unknown =
-		isRecord(payload) && "value" in payload ? payload.value : payload;
-	if (isRecord(value) && "summary" in value) {
-		const summary: unknown = value.summary;
-		if (summary === "succeeded") return;
-		throw new JitoError(
-			`simulateBundle failed: ${JSON.stringify(summary).slice(0, 300)}`,
-		);
-	}
-};
-
 export interface InflightStatus {
 	readonly status: string;
 	readonly slot: number | null;
@@ -249,7 +229,7 @@ const jitoClient = Effect.gen(function* () {
 });
 
 // why: every block-engine JSON-RPC method (getTipAccounts, sendBundle,
-// simulateBundle, getInflightBundleStatuses) lives under /api/v1/bundles;
+// getInflightBundleStatuses) lives under /api/v1/bundles;
 // POSTing to the bare host 404s.
 export const bundlesEndpoint = (blockEngineUrl: string): string => {
 	const base = blockEngineUrl.trim().replace(/\/+$/, "");
@@ -303,30 +283,6 @@ export const getTipAccounts = (args: {
 		return yield* Effect.try({
 			try: () => parseTipAccountsResponse(json),
 			catch: (e) => jitoErrorOf("getTipAccounts failed", e),
-		});
-	});
-
-export const simulateBundle = (args: {
-	readonly blockEngineUrl: string;
-	readonly transactions: readonly string[];
-}): Effect.Effect<void, JitoError> =>
-	Effect.gen(function* () {
-		if (
-			args.transactions.length === 0 ||
-			args.transactions.length > JITO_MAX_TXS
-		) {
-			return yield* Effect.fail(
-				new JitoError(
-					`simulateBundle: need 1-${JITO_MAX_TXS} transactions, got ${args.transactions.length}`,
-				),
-			);
-		}
-		const json = yield* postJsonRpc(args.blockEngineUrl, "simulateBundle", [
-			{ encodedTransactions: [...args.transactions] },
-		]);
-		return yield* Effect.try({
-			try: () => parseSimulateBundleResponse(json),
-			catch: (e) => jitoErrorOf("simulateBundle failed", e),
 		});
 	});
 

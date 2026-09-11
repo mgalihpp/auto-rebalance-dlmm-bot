@@ -14,6 +14,7 @@ import {
 	logDryRunBundlePlan,
 	resolveWidth,
 	sizeFromWalletDelta,
+	splitNativeForSwap,
 	wrapAmountAboveFloor,
 } from "../src/rebalance.ts";
 
@@ -417,5 +418,43 @@ describe("capTopUpToBalances", () => {
 				balanceY: "700",
 			}),
 		).toThrow(DlmmError);
+	});
+});
+
+describe("splitNativeForSwap", () => {
+	const split = (
+		native: string,
+		floor: string,
+		need: string,
+	): { readonly wrapAmount: string; readonly shortfall: string } =>
+		splitNativeForSwap({
+			nativeLamports: native,
+			floorLamports: floor,
+			solNeedLamports: need,
+		});
+
+	it("wraps everything above floor when Jupiter needs nothing", () => {
+		expect(split("83000000", "21000000", "0")).toEqual({
+			wrapAmount: "62000000",
+			shortfall: "0",
+		});
+	});
+
+	it("leaves the Jupiter need in native", () => {
+		expect(split("83000000", "21000000", "28406624")).toEqual({
+			wrapAmount: "33593376",
+			shortfall: "0",
+		});
+	});
+
+	it("reports a shortfall instead of going negative", () => {
+		expect(split("21000000", "21000000", "28406624")).toEqual({
+			wrapAmount: "0",
+			shortfall: "28406624",
+		});
+		expect(split("30000000", "21000000", "28406624")).toEqual({
+			wrapAmount: "0",
+			shortfall: "19406624",
+		});
 	});
 });

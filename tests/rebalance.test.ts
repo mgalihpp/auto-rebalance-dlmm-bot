@@ -11,7 +11,6 @@ import {
 	capTopUpToBalances,
 	deriveTopUp,
 	excludeFees,
-	redepositAfterHaircut,
 	resolveWidth,
 	sizeFromWalletDelta,
 	wrapAmountAboveFloor,
@@ -143,16 +142,6 @@ describe("addBaseUnits", () => {
 	});
 });
 
-describe("redepositAfterHaircut", () => {
-	it("a full 10000 bps haircut redeposits nothing", () => {
-		expect(redepositAfterHaircut("1200", 10000)).toBe("0");
-	});
-
-	it("a zero haircut redeposits the full total", () => {
-		expect(redepositAfterHaircut("1200", 0)).toBe("1200");
-	});
-});
-
 describe("excludeFees", () => {
 	it("subtracts the fee from the wallet delta", () => {
 		expect(excludeFees("1200", "200")).toBe("1000");
@@ -234,10 +223,6 @@ describe("actualSwapOut", () => {
 });
 
 describe("completeRebalanceFromWallet split", () => {
-	it("is exported for the standalone recovery script", () => {
-		expect(typeof completeRebalanceFromWallet).toBe("function");
-	});
-
 	it("recovery math: zero snapshot treats the full wallet as withdrawn", () => {
 		const current = { x: "11814000000", y: "171000000" };
 		const delta = deriveTopUp({

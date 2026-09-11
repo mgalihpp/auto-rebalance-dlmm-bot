@@ -66,10 +66,9 @@ export interface BalancedPlanInputs {
 }
 
 // why: in-place rebalance keeps the same position account alive. The SDK
-// withdraws MAX_BPS on the old range (a no-op once emptied) and deposits
+// withdraws everything on the old range (a no-op once emptied) and deposits
 // purely from topUp, so a full haircut means zero redeposit from the position.
 const FULL_HAIRCUT_BPS = 10000;
-const MAX_BPS = 10000;
 const MIN_WIDTH_BINS = 3;
 const REBALANCE_ACTIVE_BIN_SLIPPAGE = 3;
 const NATIVE_MINT = "So11111111111111111111111111111111111111112";
@@ -106,19 +105,6 @@ export const excludeFees = (
 
 // why: wallet dust predates the withdraw, so the live topUp is the post-swap
 // balance minus the pre-withdraw snapshot, floored at zero for lamport fees.
-// Mirrors SDK: total*(MAX-haircut)/MAX, so a full haircut redeposits nothing.
-export const redepositAfterHaircut = (
-	totalBaseUnit: string,
-	haircutBps: number,
-): string => {
-	const total = mustBaseUnit(totalBaseUnit, "total");
-	const haircut = Math.min(Math.max(Math.floor(haircutBps), 0), MAX_BPS);
-	return total
-		.mul(new BN(MAX_BPS - haircut))
-		.div(new BN(MAX_BPS))
-		.toString();
-};
-
 export const deriveTopUp = (args: {
 	readonly beforeX: string;
 	readonly afterX: string;
@@ -377,21 +363,33 @@ const walletBalanceOf = async (
 	return total;
 };
 
-// Wrap amount only takes what sits above the floor; the floor itself is
-// never touched. The floor is the pre-withdraw native balance (or the gas
-// reserve when higher), so a rebalance only ever uses position proceeds.
+const readWalletLeg = (
+	connection: Connection,
+	owner: PublicKey,
+	mint: PublicKey,
+	side: "X" | "Y",
+	verb: "read" | "re-read",
+): Effect.Effect<BN, DlmmError> =>
+	Effect.tryPromise({
+		try: () => walletBalanceOf(connection, owner, mint),
+		catch: (e) =>
+			new DlmmError(
+				`wallet ${side} ${verb} failed: ${e instanceof Error ? e.message : String(e)}`,
+			),
+	});
+
 export const wrapAmountAboveFloor = (args: {
 	readonly nativeLamports: string;
 	readonly floorLamports: string;
 }): string => {
-	const over = new BN(args.nativeLamports).sub(new BN(args.floorLamports));
-	return over.lte(new BN(0)) ? "0" : over.toString();
+	const over = mustBaseUnit(args.nativeLamports, "native").sub(
+		mustBaseUnit(args.floorLamports, "floor"),
+	);
+	return over.isNeg() || over.isZero() ? "0" : over.toString();
 };
 
 const TX_FEE_BUFFER_LAMPORTS = 1_000_000;
 
-// Wrap the withdraw/swap proceeds above the floor to wSOL. Pre-existing
-// native SOL (savings, gas) stays native; aborts when gas can't cover txs.
 const wrapSolLeg = (
 	connection: Connection,
 	owner: Keypair,
@@ -414,7 +412,7 @@ const wrapSolLeg = (
 		}
 		const amount = wrapAmountAboveFloor({
 			nativeLamports: String(native),
-			floorLamports: String(floorLamports + TX_FEE_BUFFER_LAMPORTS),
+			floorLamports: String(floorLamports),
 		});
 		if (amount === "0") {
 			yield* Effect.sync(() =>
@@ -647,13 +645,24 @@ export const completeRebalanceFromWallet = (
 		const tokenXMint = dlmm.tokenX.publicKey;
 		const tokenYMint = dlmm.tokenY.publicKey;
 		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
-		// Native floor: the higher of the gas reserve and the pre-withdraw
-		// balance. Only withdraw/swap proceeds above it may be wrapped, so
-		// pre-existing wallet SOL is never absorbed into the deposit.
-		const floorLamports = Math.max(
-			config.solReserveLamports,
-			Number(mustBaseUnit(walletBefore.sol, "walletBeforeSol").toString()),
-		);
+		const beforeSol = mustBaseUnit(
+			walletBefore.sol,
+			"walletBeforeSol",
+		).toNumber();
+		const floorLamports =
+			Math.max(config.solReserveLamports, beforeSol) + TX_FEE_BUFFER_LAMPORTS;
+		const involvesSol =
+			tokenXMint.toBase58() === NATIVE_MINT ||
+			tokenYMint.toBase58() === NATIVE_MINT;
+		const maybeWrapSolLeg = (): Effect.Effect<void, DlmmError> =>
+			involvesSol
+				? wrapSolLeg(
+						connection,
+						owner,
+						floorLamports,
+						config.solReserveLamports,
+					)
+				: Effect.void;
 
 		// Explicit pre-withdraw fees win when the normal path provides them;
 		// a recovery re-read sees the emptied position (zero fees), so already
@@ -674,35 +683,25 @@ export const completeRebalanceFromWallet = (
 				),
 		});
 
-		if (
-			tokenXMint.toBase58() === NATIVE_MINT ||
-			tokenYMint.toBase58() === NATIVE_MINT
-		) {
-			yield* wrapSolLeg(
-				connection,
-				owner,
-				floorLamports,
-				config.solReserveLamports,
-			);
-		}
+		yield* maybeWrapSolLeg();
 		const feeXStr =
 			claimedFees?.feeX ?? livePosition.positionData.feeX.toString();
 		const feeYStr =
 			claimedFees?.feeY ?? livePosition.positionData.feeY.toString();
-		const walletCurrentX = yield* Effect.tryPromise({
-			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
-			catch: (e) =>
-				new DlmmError(
-					`wallet X read failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
-		const walletCurrentY = yield* Effect.tryPromise({
-			try: () => walletBalanceOf(connection, owner.publicKey, tokenYMint),
-			catch: (e) =>
-				new DlmmError(
-					`wallet Y read failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
+		const walletCurrentX = yield* readWalletLeg(
+			connection,
+			owner.publicKey,
+			tokenXMint,
+			"X",
+			"read",
+		);
+		const walletCurrentY = yield* readWalletLeg(
+			connection,
+			owner.publicKey,
+			tokenYMint,
+			"Y",
+			"read",
+		);
 
 		const rawDelta = deriveTopUp({
 			beforeX: walletBefore.x,
@@ -773,35 +772,23 @@ export const completeRebalanceFromWallet = (
 			);
 		}
 
-		// Jupiter delivers a SOL leg as native SOL (unwrapped, and it closes
-		// any wSOL ATA in the same tx), invisible to ATA-only reads. Wrap
-		// the proceeds back to wSOL now, reserve still untouched, so the
-		// topUp below sees the real deposit.
-		if (
-			tokenXMint.toBase58() === NATIVE_MINT ||
-			tokenYMint.toBase58() === NATIVE_MINT
-		) {
-			yield* wrapSolLeg(
-				connection,
-				owner,
-				floorLamports,
-				config.solReserveLamports,
-			);
-		}
-		const walletAfterX = yield* Effect.tryPromise({
-			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
-			catch: (e) =>
-				new DlmmError(
-					`wallet X re-read failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
-		const walletAfterY = yield* Effect.tryPromise({
-			try: () => walletBalanceOf(connection, owner.publicKey, tokenYMint),
-			catch: (e) =>
-				new DlmmError(
-					`wallet Y re-read failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
+		// Jupiter pays the SOL leg as native and closes the wSOL ATA; re-wrap
+		// it before the topUp read.
+		yield* maybeWrapSolLeg();
+		const walletAfterX = yield* readWalletLeg(
+			connection,
+			owner.publicKey,
+			tokenXMint,
+			"X",
+			"re-read",
+		);
+		const walletAfterY = yield* readWalletLeg(
+			connection,
+			owner.publicKey,
+			tokenYMint,
+			"Y",
+			"re-read",
+		);
 		const { topUpX: rawTopUpX, topUpY: rawTopUpY } = deriveTopUp({
 			beforeX: walletBefore.x,
 			afterX: walletAfterX.toString(),
@@ -814,8 +801,6 @@ export const completeRebalanceFromWallet = (
 		const topUpY = config.compoundFees
 			? rawTopUpY
 			: excludeFees(rawTopUpY, feeYStr);
-		// A wallet delta can never exceed what the ATAs hold now; native SOL
-		// (gas) must never leak into the deposit even if a read drifts.
 		const capped = yield* Effect.try({
 			try: () =>
 				capTopUpToBalances({
@@ -938,8 +923,6 @@ export const executeRebalance = (
 					`wallet Y snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
-		// Native baseline: anything at or below this after the run stays
-		// native. Only withdraw/swap proceeds above it may enter the deposit.
 		const walletBeforeSol = yield* Effect.tryPromise({
 			try: () => connection.getBalance(owner.publicKey),
 			catch: (e) =>
@@ -977,8 +960,7 @@ export const executeRebalance = (
 			);
 		}
 
-		// One flow: the normal path withdraws above, then shares the
-		// wallet-resume below with recovery scripts.
+		// One flow shared with recovery scripts.
 		yield* completeRebalanceFromWallet(
 			ctx,
 			config,

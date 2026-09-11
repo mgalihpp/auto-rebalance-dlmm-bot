@@ -245,7 +245,7 @@ const jitoErrorOf = (where: string, e: unknown): JitoError =>
 
 const jitoClient = Effect.gen(function* () {
 	const base = yield* HttpClient.HttpClient;
-	return base.pipe(HttpClient.filterStatusOk);
+	return base;
 });
 
 // why: every block-engine JSON-RPC method (getTipAccounts, sendBundle,
@@ -257,6 +257,9 @@ export const bundlesEndpoint = (blockEngineUrl: string): string => {
 	return `${base}/api/v1/bundles`;
 };
 
+// why: the engine explains 4xx in the body (expired blockhash, failed leg),
+// and a status filter would discard it. Read the body on any status so the
+// caller sees the real reason.
 const postJsonRpc = (
 	url: string,
 	method: string,
@@ -279,8 +282,16 @@ const postJsonRpc = (
 			Effect.timeout("10 seconds"),
 			Effect.mapError((e) => jitoErrorOf(method, e)),
 		);
-		return yield* response.json.pipe(
-			Effect.mapError((e) => jitoErrorOf(`${method}: bad JSON body`, e)),
+		if (response.status >= 200 && response.status < 300) {
+			return yield* response.json.pipe(
+				Effect.mapError((e) => jitoErrorOf(`${method}: bad JSON body`, e)),
+			);
+		}
+		const body = yield* response.text.pipe(
+			Effect.catch(() => Effect.succeed("")),
+		);
+		return yield* Effect.fail(
+			new JitoError(`${method}: HTTP ${response.status} ${body.slice(0, 500)}`),
 		);
 	}).pipe(Effect.provide(FetchHttpClient.layer));
 

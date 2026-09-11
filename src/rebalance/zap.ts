@@ -6,6 +6,9 @@ import type {
 import {
 	DlmmSwapType,
 	estimateDlmmRebalanceSwap,
+	getLbPairState,
+	getOrCreateATAInstruction,
+	getTokenProgramFromMint,
 	Zap,
 } from "@meteora-ag/zap-sdk";
 import {
@@ -13,7 +16,8 @@ import {
 	type Keypair,
 	PublicKey,
 	sendAndConfirmTransaction,
-	type Transaction,
+	Transaction,
+	type TransactionInstruction,
 } from "@solana/web3.js";
 import { Data, Effect } from "effect";
 import { toStrategyType } from "./dlmm.ts";
@@ -117,11 +121,68 @@ function sendZapTx(
 	});
 }
 
+// The DLMM RebalanceLiquidity instruction requires both user token accounts
+// to already exist. A wallet that never held one side has no ATA for it, and
+// simulation fails with AccountNotInitialized (3012). The Meteora UI creates
+// the missing ATA first — do the same, using the SDK's own helper so
+// Token-2022 mints resolve to the right program.
+function ensureUserTokenAccounts(
+	connection: Connection,
+	signer: Keypair,
+	lbPair: PublicKey,
+): Effect.Effect<void, ZapError> {
+	return Effect.gen(function* () {
+		const owner = signer.publicKey;
+		const pairState = yield* Effect.tryPromise({
+			try: () => getLbPairState(connection, lbPair),
+			catch: toZapError,
+		});
+		const instructions: TransactionInstruction[] = [];
+		for (const mint of [pairState.tokenXMint, pairState.tokenYMint]) {
+			const tokenProgram = yield* Effect.tryPromise({
+				try: () => getTokenProgramFromMint(connection, mint),
+				catch: toZapError,
+			});
+			const { ix } = yield* Effect.tryPromise({
+				try: () =>
+					getOrCreateATAInstruction(
+						connection,
+						mint,
+						owner,
+						owner,
+						false,
+						tokenProgram,
+					),
+				catch: toZapError,
+			});
+			if (ix) {
+				instructions.push(ix);
+			}
+		}
+		if (instructions.length === 0) {
+			return;
+		}
+		const signature = yield* sendZapTx(
+			connection,
+			new Transaction().add(...instructions),
+			signer,
+		);
+		console.log(
+			`Created ${instructions.length} missing token account(s): ${signature}`,
+		);
+	});
+}
+
 export function executeZapRebalance(
 	input: ZapExecuteInput,
 ): Effect.Effect<{ signature: string }, ZapError> {
 	return Effect.gen(function* () {
 		const { zap, estimate } = input.plan;
+		yield* ensureUserTokenAccounts(
+			input.connection,
+			input.signer,
+			estimate.context.lbPair,
+		);
 		const response: RebalanceDlmmPositionResponse = yield* Effect.tryPromise({
 			try: () =>
 				zap.rebalanceDlmmPosition({

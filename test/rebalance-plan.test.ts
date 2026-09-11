@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { StrategyType } from "@meteora-ag/dlmm";
 import BN from "bn.js";
 import { Effect } from "effect";
+import { toStrategyType } from "../src/rebalance/dlmm.ts";
 import {
 	buildRebalancePlan,
 	originalHalfRange,
@@ -110,6 +112,8 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(makeSnapshot(), {
 				slippageBps: 50,
+				compoundFees: true,
+				strategy: "Curve",
 			}),
 		);
 		expect(plan.strategy).toEqual({
@@ -125,6 +129,8 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(makeSnapshot(), {
 				slippageBps: 50,
+				compoundFees: true,
+				strategy: "Curve",
 			}),
 		);
 		expect(plan.swap.direction).toBe("None");
@@ -140,7 +146,7 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(
 				makeSnapshot({ amountY: new BN(0), feeY: new BN(0) }),
-				{ slippageBps: 50 },
+				{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 			),
 		);
 		expect(plan.swap.direction).toBe("XtoY");
@@ -154,7 +160,7 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(
 				makeSnapshot({ amountX: new BN(0), feeX: new BN(0) }),
-				{ slippageBps: 50 },
+				{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 			),
 		);
 		expect(plan.swap.direction).toBe("YtoX");
@@ -168,10 +174,46 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(
 				makeSnapshot({ amountX: new BN(900_000), feeX: new BN(100_000) }),
-				{ slippageBps: 50 },
+				{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 			),
 		);
 		expect(plan.currentX.toString()).toBe("1000000");
+	});
+
+	test("compoundFees true includes unclaimed fees in targets", async () => {
+		const plan = await Effect.runPromise(
+			buildRebalancePlan(
+				makeSnapshot({
+					amountX: new BN(900_000),
+					feeX: new BN(100_000),
+					feeY: new BN(200_000),
+				}),
+				{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
+			),
+		);
+		expect(plan.currentX.toString()).toBe("1000000");
+		expect(plan.currentY.toString()).toBe("2200000");
+		expect(plan.targetX.toString()).toBe("1000000");
+		expect(plan.targetY.toString()).toBe("2200000");
+	});
+
+	test("compoundFees false excludes unclaimed fees from targets", async () => {
+		const plan = await Effect.runPromise(
+			buildRebalancePlan(
+				makeSnapshot({
+					amountX: new BN(900_000),
+					feeX: new BN(100_000),
+					feeY: new BN(200_000),
+				}),
+				{ slippageBps: 50, compoundFees: false, strategy: "Curve" },
+			),
+		);
+		expect(plan.currentX.toString()).toBe("900000");
+		expect(plan.currentY.toString()).toBe("2000000");
+		expect(plan.targetX.toString()).toBe("900000");
+		expect(plan.targetY.toString()).toBe("2000000");
+		expect(plan.claimedFeeX.toString()).toBe("10000");
+		expect(plan.claimedFeeY.toString()).toBe("20000");
 	});
 
 	test("rejects an empty position", async () => {
@@ -184,7 +226,7 @@ describe("buildRebalancePlan", () => {
 						feeX: new BN(0),
 						feeY: new BN(0),
 					}),
-					{ slippageBps: 50 },
+					{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 				),
 			),
 		).rejects.toThrow("position holds no liquidity");
@@ -199,7 +241,7 @@ describe("buildRebalancePlan", () => {
 						lowerBinId: 0,
 						upperBinId: 3000,
 					}),
-					{ slippageBps: 50 },
+					{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 				),
 			),
 		).rejects.toThrow("invalid halfWidth");
@@ -209,6 +251,8 @@ describe("buildRebalancePlan", () => {
 		const plan = await Effect.runPromise(
 			buildRebalancePlan(makeSnapshot({ activeBinId: 1040 }), {
 				slippageBps: 50,
+				compoundFees: true,
+				strategy: "Curve",
 			}),
 		);
 		expect(plan.strategy).toEqual({
@@ -231,7 +275,7 @@ describe("buildRebalancePlan", () => {
 					lowerBinId: 0,
 					upperBinId: 9,
 				}),
-				{ slippageBps: 50 },
+				{ slippageBps: 50, compoundFees: true, strategy: "Curve" },
 			),
 		);
 		expect(plan.strategy).toEqual({
@@ -246,6 +290,8 @@ describe("buildRebalancePlan", () => {
 			Effect.runPromise(
 				buildRebalancePlan(makeSnapshot({ lowerBinId: 100, upperBinId: 100 }), {
 					slippageBps: 50,
+					compoundFees: true,
+					strategy: "Curve",
 				}),
 			),
 		).rejects.toThrow("invalid position range");
@@ -253,8 +299,48 @@ describe("buildRebalancePlan", () => {
 			Effect.runPromise(
 				buildRebalancePlan(makeSnapshot({ lowerBinId: 200, upperBinId: 100 }), {
 					slippageBps: 50,
+					compoundFees: true,
+					strategy: "Curve",
 				}),
 			),
 		).rejects.toThrow("invalid position range");
+	});
+
+	test("Spot kind flows through to plan.strategy.kind", async () => {
+		const plan = await Effect.runPromise(
+			buildRebalancePlan(makeSnapshot(), {
+				slippageBps: 50,
+				compoundFees: true,
+				strategy: "Spot",
+			}),
+		);
+		expect(plan.strategy).toEqual({
+			kind: "Spot",
+			minBinId: 966,
+			maxBinId: 1034,
+		});
+	});
+
+	test("BidAsk kind flows through to plan.strategy.kind", async () => {
+		const plan = await Effect.runPromise(
+			buildRebalancePlan(makeSnapshot(), {
+				slippageBps: 50,
+				compoundFees: true,
+				strategy: "BidAsk",
+			}),
+		);
+		expect(plan.strategy).toEqual({
+			kind: "BidAsk",
+			minBinId: 966,
+			maxBinId: 1034,
+		});
+	});
+});
+
+describe("toStrategyType", () => {
+	test("maps every StrategyKind to the SDK enum", () => {
+		expect(toStrategyType("Spot")).toBe(StrategyType.Spot);
+		expect(toStrategyType("Curve")).toBe(StrategyType.Curve);
+		expect(toStrategyType("BidAsk")).toBe(StrategyType.BidAsk);
 	});
 });

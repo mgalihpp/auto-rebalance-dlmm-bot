@@ -9,7 +9,7 @@ import {
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
-import type { PositionSnapshot } from "./plan.ts";
+import type { PositionSnapshot, StrategyKind } from "./plan.ts";
 
 export class DlmmError extends Data.TaggedError("DlmmError")<{
 	message: string;
@@ -50,6 +50,18 @@ export interface EnterPositionInput {
 	totalY: BN;
 	minBinId: number;
 	maxBinId: number;
+	strategy: StrategyKind;
+}
+
+export function toStrategyType(kind: StrategyKind): StrategyType {
+	switch (kind) {
+		case "Spot":
+			return StrategyType.Spot;
+		case "Curve":
+			return StrategyType.Curve;
+		case "BidAsk":
+			return StrategyType.BidAsk;
+	}
 }
 
 function toDlmmError(error: unknown): DlmmError {
@@ -190,7 +202,7 @@ export function exitPosition(
 	});
 }
 
-export function enterCurvePosition(
+export function enterPosition(
 	input: EnterPositionInput,
 ): Effect.Effect<{ position: string; signature: string }, DlmmError> {
 	return Effect.gen(function* () {
@@ -205,7 +217,7 @@ export function enterCurvePosition(
 					strategy: {
 						minBinId: input.minBinId,
 						maxBinId: input.maxBinId,
-						strategyType: StrategyType.Curve,
+						strategyType: toStrategyType(input.strategy),
 					},
 				}),
 			catch: toDlmmError,

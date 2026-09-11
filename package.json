@@ -5,6 +5,7 @@
 	"private": true,
 	"scripts": {
 		"start": "bun run index.ts",
+		"rebalance:test": "bun run scripts/test-rebalance.ts",
 		"test": "bun test",
 		"check": "biome check .",
 		"check:write": "biome check --write .",

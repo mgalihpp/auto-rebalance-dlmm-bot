@@ -58,6 +58,8 @@ export interface RebalancePlan {
 
 export interface PlanOptions {
 	slippageBps: number;
+	compoundFees: boolean;
+	strategy: StrategyKind;
 }
 
 export interface TokenMints {
@@ -184,9 +186,13 @@ export function buildRebalancePlan(
 			);
 		}
 
-		// Unclaimed fees are withdrawn on exit, so they count toward redeposit totals.
-		const haveX = snapshot.amountX.add(snapshot.feeX);
-		const haveY = snapshot.amountY.add(snapshot.feeY);
+		// Unclaimed fees are withdrawn on exit but only redeposited when compounding.
+		const haveX = opts.compoundFees
+			? snapshot.amountX.add(snapshot.feeX)
+			: snapshot.amountX;
+		const haveY = opts.compoundFees
+			? snapshot.amountY.add(snapshot.feeY)
+			: snapshot.amountY;
 		const hasX = haveX.gt(DUST_THRESHOLD);
 		const hasY = haveY.gt(DUST_THRESHOLD);
 		if (!hasX && !hasY) {
@@ -254,7 +260,7 @@ export function buildRebalancePlan(
 			claimedFeeY: snapshot.claimedFeeY,
 			targetX,
 			targetY,
-			strategy: { kind: "Curve", minBinId, maxBinId },
+			strategy: { kind: opts.strategy, minBinId, maxBinId },
 			swap,
 			slippageBps: opts.slippageBps,
 		} satisfies RebalancePlan;

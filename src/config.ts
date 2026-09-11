@@ -1,6 +1,7 @@
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
+import type { StrategyKind } from "./rebalance/plan.ts";
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
 	message: string;
@@ -13,6 +14,8 @@ export interface BotConfig {
 	slippageBps: number;
 	driftThresholdBins: number;
 	dryRun: boolean;
+	compoundFees: boolean;
+	strategy: StrategyKind;
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
 }
@@ -69,11 +72,13 @@ function asPublicKey(
 	}
 }
 
-function parseDryRun(
+function parseBoolVar(
+	name: string,
 	raw: string | undefined,
+	fallback: boolean,
 ): Effect.Effect<boolean, ConfigError> {
 	if (raw === undefined || raw === "") {
-		return Effect.succeed(true);
+		return Effect.succeed(fallback);
 	}
 	const normalized = raw.trim().toLowerCase();
 	if (normalized === "true" || normalized === "1" || normalized === "yes") {
@@ -82,7 +87,32 @@ function parseDryRun(
 	if (normalized === "false" || normalized === "0" || normalized === "no") {
 		return Effect.succeed(false);
 	}
-	return fail(`invalid DRY_RUN: expected true/false, got "${raw}"`);
+	return fail(`invalid ${name}: expected true/false, got "${raw}"`);
+}
+
+function parseStrategyVar(
+	name: string,
+	raw: string | undefined,
+	fallback: StrategyKind,
+): Effect.Effect<StrategyKind, ConfigError> {
+	if (raw === undefined || raw === "") {
+		return Effect.succeed(fallback);
+	}
+	const normalized = raw.trim().toLowerCase();
+	if (normalized === "spot") {
+		return Effect.succeed("Spot");
+	}
+	if (normalized === "curve") {
+		return Effect.succeed("Curve");
+	}
+	if (
+		normalized === "bidask" ||
+		normalized === "bid-ask" ||
+		normalized === "bid_ask"
+	) {
+		return Effect.succeed("BidAsk");
+	}
+	return fail(`invalid ${name}: expected Spot|Curve|BidAsk, got "${raw}"`);
 }
 
 export function loadConfig(
@@ -134,7 +164,21 @@ export function loadConfig(
 			0,
 			1024,
 		);
-		const dryRun = yield* parseDryRun(optional("DRY_RUN", env));
+		const dryRun = yield* parseBoolVar(
+			"DRY_RUN",
+			optional("DRY_RUN", env),
+			true,
+		);
+		const compoundFees = yield* parseBoolVar(
+			"COMPOUND_FEES",
+			optional("COMPOUND_FEES", env),
+			true,
+		);
+		const strategy = yield* parseStrategyVar(
+			"STRATEGY",
+			optional("STRATEGY", env),
+			"Curve",
+		);
 		const jupiterApiKey = optional("JUPITER_API_KEY", env);
 
 		return {
@@ -144,6 +188,8 @@ export function loadConfig(
 			slippageBps,
 			driftThresholdBins,
 			dryRun,
+			compoundFees,
+			strategy,
 			jupiterApiKey,
 			secretKey,
 		} satisfies BotConfig;

@@ -4,18 +4,13 @@ import Decimal from "decimal.js";
 import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadConfig } from "./config.ts";
-import {
-	claimFees,
-	enterCurvePosition,
-	exitPosition,
-	loadPositionState,
-} from "./rebalance/dlmm.ts";
+import { loadPositionState } from "./rebalance/dlmm.ts";
+import { executeRebalance } from "./rebalance/execute.ts";
 import {
 	buildRebalancePlan,
 	type RebalancePlan,
 	shouldRebalance,
 } from "./rebalance/plan.ts";
-import { executeSwapLeg } from "./rebalance/swap.ts";
 
 loadDotenv();
 
@@ -52,7 +47,7 @@ function printPreview(
 	);
 	console.log(
 		`Rebalanced:      X=${formatBn(plan.targetX)} Y=${formatBn(plan.targetY)} ` +
-			`(Curve ${plan.strategy.minBinId} - ${plan.strategy.maxBinId})`,
+			`(${plan.strategy.kind} ${plan.strategy.minBinId} - ${plan.strategy.maxBinId})`,
 	);
 	console.log(`Swaps required:  ${describeSwap(plan)}`);
 	console.log(
@@ -90,57 +85,31 @@ const main = Effect.gen(function* () {
 
 	const plan = yield* buildRebalancePlan(snapshot, {
 		slippageBps: botConfig.slippageBps,
+		compoundFees: botConfig.compoundFees,
+		strategy: botConfig.strategy,
 	});
 	printPreview(plan, {
 		lowerBinId: snapshot.lowerBinId,
 		upperBinId: snapshot.upperBinId,
 	});
+	if (!botConfig.compoundFees) {
+		console.log("Fees: excluded from redeposit (COMPOUND_FEES=false)");
+	}
 
 	if (botConfig.dryRun) {
 		console.log("Dry run — no transactions sent.");
 		return;
 	}
 
-	const claimSignatures = yield* claimFees({
+	yield* executeRebalance({
 		connection,
 		dlmm: state.dlmm,
 		signer,
 		position: state.position,
-	});
-	console.log(`Fees claimed in ${claimSignatures.length} tx(s).`);
-
-	const exitSignatures = yield* exitPosition({
-		connection,
-		dlmm: state.dlmm,
-		signer,
-		position: state.position,
-	});
-	console.log(`Exited position in ${exitSignatures.length} tx(s).`);
-
-	const swapSignature = yield* executeSwapLeg({
-		leg: plan.swap,
-		taker: signer,
+		plan,
 		slippageBps: botConfig.slippageBps,
-		apiKey: botConfig.jupiterApiKey,
+		jupiterApiKey: botConfig.jupiterApiKey,
 	});
-	if (swapSignature) {
-		console.log(`Swap landed: ${swapSignature}`);
-	} else {
-		console.log("No swap needed.");
-	}
-
-	const entered = yield* enterCurvePosition({
-		connection,
-		dlmm: state.dlmm,
-		signer,
-		totalX: plan.targetX,
-		totalY: plan.targetY,
-		minBinId: plan.strategy.minBinId,
-		maxBinId: plan.strategy.maxBinId,
-	});
-	console.log(
-		`Opened Curve position ${entered.position}: ${entered.signature}`,
-	);
 });
 
 Effect.runPromise(main).then(

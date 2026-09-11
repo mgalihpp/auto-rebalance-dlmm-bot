@@ -23,12 +23,16 @@ PRIVATE_KEY=<bs58-secret-key>
 SLIPPAGE_BPS=50
 DRIFT_THRESHOLD_BINS=10
 DRY_RUN=true
+COMPOUND_FEES=true
+STRATEGY=Curve
 JUPITER_API_KEY=<optional>
 ```
 
 `POSITION_ADDRESS` is optional; when omitted the bot uses your first position
-in the pool. `DRY_RUN=true` prints the preview below and exits without sending
-transactions. The new Curve range always follows the original position width,
+in the pool. `STRATEGY` selects the DLMM liquidity shape (`Spot`, `Curve`, or
+`BidAsk`; default `Curve`). `DRY_RUN=true` prints the preview below and exits without sending
+transactions. `COMPOUND_FEES=false` withdraws fees to the wallet on exit but
+excludes them from the redeposit targets (default `true` reinvests them). The new Curve range always follows the original position width,
 recentered on the active bin.
 
 ## Run

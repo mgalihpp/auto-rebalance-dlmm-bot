@@ -755,8 +755,16 @@ export const completeRebalanceFromWallet = (
 			);
 		}
 
-		// 4. Derive the actual topUp from the wallet delta, then rebalance the
-		// same position in place with a full haircut (deposit is topUp only).
+		// Jupiter delivers a SOL leg as native SOL (unwrapped, and it closes
+		// any wSOL ATA in the same tx), invisible to ATA-only reads. Wrap
+		// the proceeds back to wSOL now, reserve still untouched, so the
+		// topUp below sees the real deposit.
+		if (
+			tokenXMint.toBase58() === NATIVE_MINT ||
+			tokenYMint.toBase58() === NATIVE_MINT
+		) {
+			yield* wrapSolLeg(connection, owner, config.solReserveLamports);
+		}
 		const walletAfterX = yield* Effect.tryPromise({
 			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
 			catch: (e) =>

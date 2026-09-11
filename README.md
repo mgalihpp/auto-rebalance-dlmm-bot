@@ -24,6 +24,7 @@ Status yang dilacak:
 3. Kalau `OutOfRange`:
    - Withdraw 100% dari posisi (tanpa close).
    - Bagi target 50/50. Sisi yang berlebih di-swap lewat Jupiter.
+   - Output swap yang berupa SOL mendarat sebagai native, jadi di-wrap ulang ke wSOL sebelum deposit.
    - Deposit lagi ke posisi yang sama, terpusat di active bin.
    - Fee hasil claim masuk ke wallet, tidak ikut di-deposit ulang (kecuali `COMPOUND_FEES=true`).
    - SOL untuk gas selalu disisakan sebesar `SOL_RESERVE_SOL`, tidak ikut dipakai.

@@ -1,5 +1,7 @@
-// LIVE rebalance trigger. Sends REAL transactions against the pool in .env:
-// claim -> exit -> swap -> enter. No drift gate, no dry-run, no index.ts.
+// LIVE rebalance trigger. Sends REAL transactions against the pool in .env
+// via the zap-sdk engine (same as the Meteora UI): estimate the balancing
+// swap, then remove -> swap -> zap back in. No drift gate, no dry-run,
+// no index.ts.
 //
 // Usage: bun run scripts/test-rebalance.ts --live
 // Without --live this script exits immediately without touching RPC.
@@ -8,8 +10,12 @@ import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadConfig } from "../src/config.ts";
 import { loadPositionState } from "../src/rebalance/dlmm.ts";
-import { executeRebalance } from "../src/rebalance/execute.ts";
-import { buildRebalancePlan } from "../src/rebalance/plan.ts";
+import { originalHalfRange } from "../src/rebalance/plan.ts";
+import {
+	describeZapSwap,
+	executeZapRebalance,
+	planZapRebalance,
+} from "../src/rebalance/zap.ts";
 
 if (!process.argv.includes("--live")) {
 	console.error("REFUSING: this script sends REAL transactions.");
@@ -17,7 +23,7 @@ if (!process.argv.includes("--live")) {
 	process.exit(2);
 }
 
-console.log("=== LIVE REBALANCE TRIGGER ===");
+console.log("=== LIVE REBALANCE TRIGGER (zap) ===");
 console.log("Real transactions in 5s. Ctrl+C to abort.");
 await new Promise((resolve) => setTimeout(resolve, 5000));
 
@@ -34,27 +40,34 @@ const main = Effect.gen(function* () {
 		owner: signer.publicKey,
 	});
 	const snapshot = state.snapshot;
+	const halfWidth = originalHalfRange(snapshot.lowerBinId, snapshot.upperBinId);
 	console.log(
 		`Rebalancing ${snapshot.position} (active ${snapshot.activeBinId}, ` +
 			`range ${snapshot.lowerBinId}-${snapshot.upperBinId}) -> ` +
-			`${botConfig.strategy} compound=${botConfig.compoundFees}`,
+			`${botConfig.strategy} delta -${halfWidth}..+${halfWidth}`,
 	);
 
-	const plan = yield* buildRebalancePlan(snapshot, {
-		slippageBps: botConfig.slippageBps,
-		compoundFees: botConfig.compoundFees,
-		strategy: botConfig.strategy,
-	});
-
-	yield* executeRebalance({
+	const plan = yield* planZapRebalance({
 		connection,
-		dlmm: state.dlmm,
-		signer,
-		position: state.position,
-		plan,
+		poolAddress: botConfig.poolAddress,
+		positionAddress: snapshot.position,
+		strategy: botConfig.strategy,
 		slippageBps: botConfig.slippageBps,
+		halfWidth,
 		jupiterApiKey: botConfig.jupiterApiKey,
 	});
+	const result = plan.estimate.result;
+	console.log(
+		`Swap: ${describeZapSwap(plan.estimate)} -> ` +
+			`X=${result.postSwapX.toString()} Y=${result.postSwapY.toString()}`,
+	);
+
+	const done = yield* executeZapRebalance({
+		connection,
+		signer,
+		plan,
+	});
+	console.log(`Rebalanced via zap: ${done.signature}`);
 });
 
 Effect.runPromise(main).then(

@@ -5,12 +5,13 @@ import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
-import { executeRebalance } from "./rebalance/execute.ts";
+import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
-	buildRebalancePlan,
-	type RebalancePlan,
-	shouldRebalance,
-} from "./rebalance/plan.ts";
+	describeZapSwap,
+	executeZapRebalance,
+	planZapRebalance,
+	type ZapPlan,
+} from "./rebalance/zap.ts";
 
 loadDotenv();
 
@@ -18,41 +19,32 @@ function formatBn(value: BN): string {
 	return new Decimal(value.toString()).toFixed(0);
 }
 
-function describeSwap(plan: RebalancePlan): string {
-	if (plan.swap.direction === "None") {
-		return "none";
-	}
-	const arrow = plan.swap.direction === "XtoY" ? "X -> Y" : "Y -> X";
-	return `${arrow} amount=${formatBn(plan.swap.inAmount)} minOut=${formatBn(plan.swap.minOutAmount)} (Jupiter)`;
-}
-
 function printPreview(
-	plan: RebalancePlan,
-	snapshot: { lowerBinId: number; upperBinId: number },
+	plan: ZapPlan,
+	snapshot: {
+		pool: string;
+		position: string;
+		activeBinId: number;
+		lowerBinId: number;
+		upperBinId: number;
+	},
 ) {
-	const width = snapshot.upperBinId - snapshot.lowerBinId;
-	console.log("=== DLMM auto-rebalance preview ===");
-	console.log(`Pool:            ${plan.pool}`);
-	console.log(`Position:        ${plan.position}`);
-	console.log(`Active bin:      ${plan.activeBinId}`);
+	const result = plan.estimate.result;
+	console.log("=== DLMM auto-rebalance preview (zap) ===");
+	console.log(`Pool:            ${snapshot.pool}`);
+	console.log(`Position:        ${snapshot.position}`);
+	console.log(`Active bin:      ${snapshot.activeBinId}`);
 	console.log(
 		`Current range:   ${snapshot.lowerBinId} - ${snapshot.upperBinId}`,
 	);
 	console.log(
-		`Range: original ${snapshot.lowerBinId}-${snapshot.upperBinId} (width ${width}) -> ` +
-			`new ${plan.strategy.minBinId}-${plan.strategy.maxBinId}`,
+		`New range:       active ${snapshot.activeBinId} ` +
+			`delta ${plan.minDeltaId}..${plan.maxDeltaId}`,
 	);
 	console.log(
-		`Current:         X=${formatBn(plan.currentX)} Y=${formatBn(plan.currentY)}`,
+		`Rebalanced:      X=${formatBn(result.postSwapX)} Y=${formatBn(result.postSwapY)}`,
 	);
-	console.log(
-		`Rebalanced:      X=${formatBn(plan.targetX)} Y=${formatBn(plan.targetY)} ` +
-			`(${plan.strategy.kind} ${plan.strategy.minBinId} - ${plan.strategy.maxBinId})`,
-	);
-	console.log(`Swaps required:  ${describeSwap(plan)}`);
-	console.log(
-		`Fees claimed:    X=${formatBn(plan.claimedFeeX)} Y=${formatBn(plan.claimedFeeY)} (lifetime)`,
-	);
+	console.log(`Swaps required:  ${describeZapSwap(plan.estimate)}`);
 	console.log(`Slippage:        ${plan.slippageBps} bps`);
 }
 
@@ -99,33 +91,38 @@ function runIteration() {
 			return;
 		}
 
-		const plan = yield* buildRebalancePlan(snapshot, {
-			slippageBps: botConfig.slippageBps,
-			compoundFees: botConfig.compoundFees,
+		const halfWidth = originalHalfRange(
+			snapshot.lowerBinId,
+			snapshot.upperBinId,
+		);
+		const plan = yield* planZapRebalance({
+			connection,
+			poolAddress: botConfig.poolAddress,
+			positionAddress: snapshot.position,
 			strategy: botConfig.strategy,
+			slippageBps: botConfig.slippageBps,
+			halfWidth,
+			jupiterApiKey: botConfig.jupiterApiKey,
 		});
 		printPreview(plan, {
+			pool: snapshot.pool,
+			position: snapshot.position,
+			activeBinId: snapshot.activeBinId,
 			lowerBinId: snapshot.lowerBinId,
 			upperBinId: snapshot.upperBinId,
 		});
-		if (!botConfig.compoundFees) {
-			console.log("Fees: excluded from redeposit (COMPOUND_FEES=false)");
-		}
 
 		if (botConfig.dryRun) {
 			console.log("Dry run — no transactions sent.");
 			return;
 		}
 
-		yield* executeRebalance({
+		const done = yield* executeZapRebalance({
 			connection,
-			dlmm: state.dlmm,
 			signer,
-			position: state.position,
 			plan,
-			slippageBps: botConfig.slippageBps,
-			jupiterApiKey: botConfig.jupiterApiKey,
 		});
+		console.log(`Rebalanced via zap: ${done.signature}`);
 	});
 }
 

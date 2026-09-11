@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	assertBundlePlan,
+	bundlesEndpoint,
 	formatBundlePlan,
 	JitoError,
 	parseInflightStatusResponse,
@@ -203,5 +204,21 @@ describe("formatBundlePlan", () => {
 		});
 		expect(out).toContain("withdraw");
 		expect(out).toContain(TIP_A);
+	});
+});
+
+describe("bundlesEndpoint", () => {
+	it("appends /api/v1/bundles to a bare host", () => {
+		expect(bundlesEndpoint("https://mainnet.block-engine.jito.wtf")).toBe(
+			"https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+		);
+	});
+	it("tolerates trailing slashes and keeps a full path", () => {
+		expect(bundlesEndpoint("https://tokyo.mainnet.block-engine.jito.wtf/")).toBe(
+			"https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
+		);
+		expect(
+			bundlesEndpoint("https://mainnet.block-engine.jito.wtf/api/v1/bundles"),
+		).toBe("https://mainnet.block-engine.jito.wtf/api/v1/bundles");
 	});
 });

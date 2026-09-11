@@ -248,6 +248,15 @@ const jitoClient = Effect.gen(function* () {
 	return base.pipe(HttpClient.filterStatusOk);
 });
 
+// why: every block-engine JSON-RPC method (getTipAccounts, sendBundle,
+// simulateBundle, getInflightBundleStatuses) lives under /api/v1/bundles;
+// POSTing to the bare host 404s.
+export const bundlesEndpoint = (blockEngineUrl: string): string => {
+	const base = blockEngineUrl.trim().replace(/\/+$/, "");
+	if (base.toLowerCase().endsWith("/api/v1/bundles")) return base;
+	return `${base}/api/v1/bundles`;
+};
+
 const postJsonRpc = (
 	url: string,
 	method: string,
@@ -255,7 +264,7 @@ const postJsonRpc = (
 ): Effect.Effect<unknown, JitoError> =>
 	Effect.gen(function* () {
 		const client = yield* jitoClient;
-		const request = HttpClientRequest.post(url).pipe(
+		const request = HttpClientRequest.post(bundlesEndpoint(url)).pipe(
 			HttpClientRequest.setHeaders({
 				"content-type": "application/json",
 			}),

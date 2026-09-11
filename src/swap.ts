@@ -1,4 +1,4 @@
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, type Keypair, VersionedTransaction } from "@solana/web3.js";
 import { Effect, Schedule, Schema } from "effect";
 import {
 	FetchHttpClient,
@@ -252,6 +252,30 @@ const assertMintArg = (raw: string, name: string): string => {
 		);
 	}
 };
+
+export interface SignJupiterOrderArgs {
+	readonly transactionB64: string;
+	readonly owner: Keypair;
+}
+
+// why: the bundle path self-broadcasts inside a Jito bundle, so it signs the
+// /order transaction locally and skips /execute. Routes needing the
+// market-maker co-sign fail bundle simulation, which falls back to sequential.
+export const signJupiterOrder = (
+	args: SignJupiterOrderArgs,
+): Effect.Effect<string, SwapError> =>
+	Effect.try({
+		try: () => {
+			const tx = VersionedTransaction.deserialize(
+				Uint8Array.from(
+					Buffer.from(assertBase64(args.transactionB64, "Jupiter order"), "base64"),
+				),
+			);
+			tx.sign([args.owner]);
+			return Buffer.from(tx.serialize()).toString("base64");
+		},
+		catch: (e) => swapErrorOf("Jupiter sign failed", e),
+	});
 
 export const getJupiterOrder = (
 	args: GetJupiterOrderArgs,

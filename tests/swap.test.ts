@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
+	Keypair,
+	TransactionMessage,
+	VersionedTransaction,
+} from "@solana/web3.js";
+import { Effect } from "effect";
+import {
 	parseJupiterExecuteResponse,
 	parseJupiterOrderResponse,
+	signJupiterOrder,
 	SwapError,
 } from "../src/swap.ts";
 
@@ -190,5 +197,44 @@ describe("parseJupiterExecuteResponse", () => {
 	it("keeps mint fixtures valid (boundary shape)", () => {
 		expect(X_MINT).toBe("So11111111111111111111111111111111111111112");
 		expect(Y_MINT).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+	});
+});
+
+describe("signJupiterOrder", () => {
+	const unsignedB64 = (): { b64: string; owner: Keypair } => {
+		const owner = Keypair.generate();
+		const message = new TransactionMessage({
+			payerKey: owner.publicKey,
+			recentBlockhash: "11111111111111111111111111111111",
+			instructions: [],
+		}).compileToV0Message();
+		const b64 = Buffer.from(new VersionedTransaction(message).serialize()).toString(
+			"base64",
+		);
+		return { b64, owner };
+	};
+
+	it("signs locally and returns a signed base64 without broadcasting", async () => {
+		const { b64, owner } = unsignedB64();
+		const signed = await Effect.runPromise(signJupiterOrder({ transactionB64: b64, owner }));
+		expect(typeof signed).toBe("string");
+		expect(signed).not.toBe(b64);
+		const tx = VersionedTransaction.deserialize(
+			Uint8Array.from(Buffer.from(signed, "base64")),
+		);
+		expect(tx.signatures[0]?.some((b) => b !== 0)).toBe(true);
+	});
+
+	it("fails typed on broken base64", async () => {
+		const err = await Effect.runPromise(
+			Effect.flip(
+				signJupiterOrder({
+					transactionB64: "!!!not-base64!!!",
+					owner: Keypair.generate(),
+				}),
+			),
+		);
+		expect(err).toBeInstanceOf(SwapError);
+		expect(err.message).toContain("not valid base64");
 	});
 });

@@ -167,9 +167,19 @@ export const executeRebalance = (
 					blockhash,
 					lastValidBlockHeight,
 				}).add(...ixs);
-				return connection.sendTransaction(tx, [owner], {
+				const sig = await connection.sendTransaction(tx, [owner], {
 					skipPreflight: false,
 				});
+				const res = await connection.confirmTransaction(
+					{ signature: sig, blockhash, lastValidBlockHeight },
+					"confirmed",
+				);
+				if (res.value.err) {
+					throw new Error(
+						`transaction failed: ${sig} err=${JSON.stringify(res.value.err)}`,
+					);
+				}
+				return sig;
 			};
 			if (initBinArrayInstructions.length > 0) {
 				const sig = await sendIxs(initBinArrayInstructions);

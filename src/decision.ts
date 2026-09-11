@@ -17,7 +17,6 @@ export type LiquidityStrategy = "Spot" | "Curve" | "BidAsk";
 
 export interface RebalancePlan {
 	strategy: LiquidityStrategy;
-	maxActiveBinSlippage: number;
 }
 
 export type RebalanceDecision =
@@ -71,12 +70,7 @@ export function decide(
 		case "OutOfRange": {
 			return {
 				_tag: "Rebalance",
-				plan: {
-					strategy: policy.strategy,
-					// why: mirrors SDK MAX_ACTIVE_BIN_SLIPPAGE default; bounds how far
-					// the active bin may drift between simulation and execution.
-					maxActiveBinSlippage: 3,
-				},
+				plan: { strategy: policy.strategy },
 			};
 		}
 	}

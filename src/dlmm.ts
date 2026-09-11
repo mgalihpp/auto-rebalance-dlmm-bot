@@ -1,28 +1,16 @@
 import DLMM, { StrategyType } from "@meteora-ag/dlmm";
-import {
-	type Connection,
-	Keypair,
-	PublicKey,
-	Transaction,
-	type TransactionInstruction,
-} from "@solana/web3.js";
-import BN from "bn.js";
+import { type Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Effect } from "effect";
-import type { BotConfig } from "./config.ts";
 import {
 	deriveStatus,
 	type LiquidityStrategy,
 	type PositionSnapshot,
-	type RebalancePlan,
 } from "./decision.ts";
 
 export class DlmmError extends Error {
 	readonly _tag = "DlmmError";
 }
-
-const dlmmFail = (msg: string): Effect.Effect<never, DlmmError> =>
-	Effect.fail(new DlmmError(msg));
 
 export const loadKeypair = (
 	walletPrivateKey: string | null,
@@ -109,92 +97,13 @@ export interface RebalanceContext {
 
 const slippagePct = (bps: number): number => bps / 100;
 
+export { slippagePct };
+
+export const sdkStrategyOf = (s: LiquidityStrategy): StrategyType =>
+	toSdkStrategy[s];
+
 const toSdkStrategy: Record<LiquidityStrategy, StrategyType> = {
 	Spot: StrategyType.Spot,
 	Curve: StrategyType.Curve,
 	BidAsk: StrategyType.BidAsk,
-};
-
-export const logDryRunPlan = (
-	snapshot: PositionSnapshot,
-	plan: RebalancePlan,
-): Effect.Effect<void> =>
-	Effect.sync(() => {
-		console.log(
-			`[DRY_RUN] would rebalance pool=${snapshot.poolAddress} active=${snapshot.activeBinId} ` +
-				`oldRange=[${snapshot.lowerBinId},${snapshot.upperBinId}] ` +
-				`strategy=${plan.strategy} width follows existing position`,
-		);
-	});
-
-// Native rebalance path: simulate + rebalance_liquidity keeps the same position
-// account alive (no close/reopen), so no position rent is burned.
-export const executeRebalance = (
-	ctx: RebalanceContext,
-	config: BotConfig,
-	snapshot: PositionSnapshot,
-	plan: RebalancePlan,
-): Effect.Effect<void, DlmmError> => {
-	return Effect.tryPromise({
-		try: async () => {
-			const { connection, dlmm, owner } = ctx;
-			const position = new PublicKey(config.positionPubkey as string);
-			const { positionData } = await dlmm.getPosition(position);
-			// why: x/yWithdrawBps are the haircut kept out of redeposit, so 0 with
-			// zero top-up means full recenter funded only by withdrawn amounts.
-			const response =
-				await dlmm.simulateRebalancePositionWithBalancedStrategy(
-					position,
-					positionData,
-					toSdkStrategy[plan.strategy],
-					new BN(0),
-					new BN(0),
-					new BN(0),
-					new BN(0),
-				);
-			const { initBinArrayInstructions, rebalancePositionInstruction } =
-				await dlmm.rebalancePosition(
-					response,
-					new BN(plan.maxActiveBinSlippage),
-					owner.publicKey,
-					slippagePct(config.slippageBps),
-				);
-			const sendIxs = async (ixs: TransactionInstruction[]) => {
-				const { blockhash, lastValidBlockHeight } =
-					await connection.getLatestBlockhash("confirmed");
-				const tx = new Transaction({
-					feePayer: owner.publicKey,
-					blockhash,
-					lastValidBlockHeight,
-				}).add(...ixs);
-				const sig = await connection.sendTransaction(tx, [owner], {
-					skipPreflight: false,
-				});
-				const res = await connection.confirmTransaction(
-					{ signature: sig, blockhash, lastValidBlockHeight },
-					"confirmed",
-				);
-				if (res.value.err) {
-					throw new Error(
-						`transaction failed: ${sig} err=${JSON.stringify(res.value.err)}`,
-					);
-				}
-				return sig;
-			};
-			if (initBinArrayInstructions.length > 0) {
-				const sig = await sendIxs(initBinArrayInstructions);
-				console.log(`[LIVE] initBinArrays sent: ${sig}`);
-			}
-			const sig = await sendIxs(rebalancePositionInstruction);
-			console.log(
-				`[LIVE] rebalanceLiquidity sent: ${sig} ` +
-					`oldRange=[${snapshot.lowerBinId},${snapshot.upperBinId}] ` +
-					`strategy=${plan.strategy}`,
-			);
-		},
-		catch: (e) =>
-			new DlmmError(
-				`planRebalance live execution failed: ${e instanceof Error ? e.message : String(e)}`,
-			),
-	}).pipe(Effect.catch((e) => dlmmFail(e.message)));
 };

@@ -12,6 +12,10 @@ export interface BotConfig {
 	slippageBps: number;
 	dryRun: boolean;
 	edgeBufferBins: number;
+	jupiterQuoteBaseUrl: string;
+	swapSlippageBps: number;
+	positionWidthBins: number | null;
+	compoundFees: boolean;
 }
 
 export class ConfigError extends Error {
@@ -64,6 +68,45 @@ function parseStrategy(
 function parseDryRun(raw: string | undefined): boolean {
 	if (raw === undefined || raw.trim() === "") return true;
 	return raw.trim().toLowerCase() !== "false";
+}
+
+function parseBaseUrl(
+	raw: string | undefined,
+	fallback: string,
+	name: string,
+): Effect.Effect<string, ConfigError> {
+	const value = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
+	try {
+		const u = new URL(value);
+		if (u.protocol !== "http:" && u.protocol !== "https:") {
+			return fail(`${name} must be http(s) URL, got "${value}"`);
+		}
+		return Effect.succeed(value.replace(/\/+$/, ""));
+	} catch {
+		return fail(`${name} is not a valid URL: "${value}"`);
+	}
+}
+
+function parseOptionalPositiveInt(
+	raw: string | undefined,
+	name: string,
+): Effect.Effect<number | null, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed(null);
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n <= 0) {
+		return fail(`${name} must be a positive integer, got "${raw}"`);
+	}
+	return Effect.succeed(n);
+}
+
+function parseCompoundFees(
+	raw: string | undefined,
+): Effect.Effect<boolean, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed(false);
+	const v = raw.trim().toLowerCase();
+	if (v === "true") return Effect.succeed(true);
+	if (v === "false") return Effect.succeed(false);
+	return fail(`COMPOUND_FEES must be true or false, got "${raw}"`);
 }
 
 function assertPubkey(
@@ -129,6 +172,21 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			2,
 			"EDGE_BUFFER_BINS",
 		);
+		const jupiterQuoteBaseUrl = yield* parseBaseUrl(
+			env.JUPITER_QUOTE_BASE_URL,
+			"https://quote-api.jup.ag/v6",
+			"JUPITER_QUOTE_BASE_URL",
+		);
+		const swapSlippageBps = yield* parseNonNegativeInt(
+			env.SWAP_SLIPPAGE_BPS,
+			slippageBps,
+			"SWAP_SLIPPAGE_BPS",
+		);
+		const positionWidthBins = yield* parseOptionalPositiveInt(
+			env.POSITION_WIDTH_BINS,
+			"POSITION_WIDTH_BINS",
+		);
+		const compoundFees = yield* parseCompoundFees(env.COMPOUND_FEES);
 
 		return {
 			rpcUrl,
@@ -140,5 +198,9 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			slippageBps,
 			dryRun: parseDryRun(env.DRY_RUN),
 			edgeBufferBins,
+			jupiterQuoteBaseUrl,
+			swapSlippageBps,
+			positionWidthBins,
+			compoundFees,
 		} satisfies BotConfig;
 	});

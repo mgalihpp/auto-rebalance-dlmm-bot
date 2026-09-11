@@ -2,14 +2,57 @@ import DLMM from "@meteora-ag/dlmm";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { Duration, Effect } from "effect";
 import { type BotConfig, type ConfigError, loadConfig } from "./src/config.ts";
-import { decide } from "./src/decision.ts";
+import { decide, type PositionSnapshot, type RebalancePlan } from "./src/decision.ts";
+import { DlmmError, fetchSnapshot, loadKeypair } from "./src/dlmm.ts";
+import { log } from "./src/log.ts";
 import {
-	DlmmError,
 	executeRebalance,
-	fetchSnapshot,
-	loadKeypair,
-	logDryRunPlan,
-} from "./src/dlmm.ts";
+	logDryRunBalancedPlan,
+	previewBalancedPlan,
+} from "./src/rebalance.ts";
+
+const logPlanDryRun = (
+	connection: Connection,
+	config: BotConfig,
+	snapshot: PositionSnapshot,
+	plan: RebalancePlan,
+): Effect.Effect<void, never> =>
+	Effect.gen(function* () {
+		const dlmm: InstanceType<typeof DLMM> | null = yield* Effect.tryPromise({
+			try: () => DLMM.create(connection, new PublicKey(config.poolAddress)),
+			catch: () => new DlmmError("preview DLMM.create failed"),
+		}).pipe(Effect.catch(() => Effect.succeed(null)));
+		if (!dlmm) {
+			yield* Effect.sync(() =>
+				log(
+					"DRY_RUN",
+					`would rebalance pool=${snapshot.poolAddress} active=${snapshot.activeBinId} ` +
+						`oldRange=[${snapshot.lowerBinId},${snapshot.upperBinId}] strategy=${plan.strategy} (preview unavailable)`,
+				),
+			);
+			return;
+		}
+		yield* previewBalancedPlan({ dlmm, config, snapshot }).pipe(
+			Effect.flatMap((balancedPlan) =>
+				logDryRunBalancedPlan(
+					snapshot,
+					balancedPlan,
+					{
+						tokenXMint: dlmm.tokenX.publicKey.toBase58(),
+						tokenYMint: dlmm.tokenY.publicKey.toBase58(),
+						decimalsX: dlmm.tokenX.mint.decimals,
+						decimalsY: dlmm.tokenY.mint.decimals,
+					},
+					config.compoundFees
+						? undefined
+						: { feeX: balancedPlan.feeX, feeY: balancedPlan.feeY },
+				),
+			),
+			Effect.catch((e: DlmmError) =>
+				Effect.sync(() => log("DRY_RUN", `preview failed: ${e.message}`)),
+			),
+		);
+	});
 
 const oneCycle = (
 	connection: Connection,
@@ -25,7 +68,7 @@ const oneCycle = (
 		).pipe(
 			Effect.catch((e: DlmmError) =>
 				Effect.gen(function* () {
-					yield* Effect.sync(() => console.log(`[ERROR] ${e.message}`));
+					yield* Effect.sync(() => log("ERROR", e.message));
 					return {
 						poolAddress: config.poolAddress,
 						activeBinId: -1,
@@ -44,18 +87,20 @@ const oneCycle = (
 		const ts = new Date().toISOString();
 		if (decision._tag === "Hold") {
 			yield* Effect.sync(() =>
-				console.log(
-					`[${ts}] status=${snapshot.status} active=${snapshot.activeBinId} range=[${snapshot.lowerBinId},${snapshot.upperBinId}] decision=Hold reason="${decision.reason}" dryRun=${config.dryRun}`,
+				log(
+					"HOLD",
+					`ts=${ts} status=${snapshot.status} active=${snapshot.activeBinId} range=[${snapshot.lowerBinId},${snapshot.upperBinId}] reason="${decision.reason}"`,
 				),
 			);
 		} else {
 			yield* Effect.sync(() =>
-				console.log(
-					`[${ts}] status=${snapshot.status} active=${snapshot.activeBinId} range=[${snapshot.lowerBinId},${snapshot.upperBinId}] decision=Rebalance strategy=${decision.plan.strategy} dryRun=${config.dryRun}`,
+				log(
+					"REBALANCE",
+					`ts=${ts} status=${snapshot.status} active=${snapshot.activeBinId} range=[${snapshot.lowerBinId},${snapshot.upperBinId}] strategy=${decision.plan.strategy}`,
 				),
 			);
 			if (config.dryRun || !owner || !config.positionPubkey) {
-				yield* logDryRunPlan(snapshot, decision.plan);
+				yield* logPlanDryRun(connection, config, snapshot, decision.plan);
 			} else {
 				const dlmm: InstanceType<typeof DLMM> | null = yield* Effect.tryPromise(
 					{
@@ -68,7 +113,7 @@ const oneCycle = (
 				).pipe(
 					Effect.catch((e: DlmmError) =>
 						Effect.sync(() => {
-							console.log(`[ERROR] ${e.message}`);
+							log("ERROR", e.message);
 							return null;
 						}),
 					),
@@ -82,7 +127,7 @@ const oneCycle = (
 					).pipe(
 						Effect.catch((e: DlmmError) =>
 							Effect.sync(() =>
-								console.log(`[ERROR] rebalance failed: ${e.message}`),
+								log("ERROR", `rebalance failed: ${e.message}`),
 							),
 						),
 					);
@@ -96,9 +141,10 @@ const main: Effect.Effect<void, never> = Effect.gen(function* () {
 		Effect.map((c): BotConfig | null => c),
 		Effect.catch((e: ConfigError) =>
 			Effect.sync(() => {
-				console.log(`[CONFIG] ${e.message}`);
-				console.log(
-					"[CONFIG] Copy .env.example to .env, fill RPC_URL + POOL_ADDRESS (+ POSITION_PUBKEY to track a position). Exiting 0.",
+				log("CONFIG", e.message);
+				log(
+					"CONFIG",
+					"Copy .env.example to .env, fill RPC_URL + POOL_ADDRESS (+ POSITION_PUBKEY to track a position). Exiting 0.",
 				);
 				process.exit(0);
 				return null;
@@ -112,22 +158,24 @@ const main: Effect.Effect<void, never> = Effect.gen(function* () {
 		Effect.map((k): Keypair | null => k),
 		Effect.catch((e: DlmmError) =>
 			Effect.sync(() => {
-				console.log(`[WARN] wallet not loaded (${e.message}), pool-monitor mode`);
+				log("WARN", `wallet not loaded (${e.message}), pool-monitor mode`);
 				return null;
 			}),
 		),
 	);
 	if (!config.dryRun && (!owner || !config.positionPubkey)) {
-		console.log(
-			"[CONFIG] DRY_RUN=false needs a valid WALLET_PRIVATE_KEY and POSITION_PUBKEY. Set them or keep DRY_RUN=true. Exiting 1.",
+		log(
+			"CONFIG",
+			"DRY_RUN=false needs a valid WALLET_PRIVATE_KEY and POSITION_PUBKEY. Set them or keep DRY_RUN=true. Exiting 1.",
 		);
 		process.exit(1);
 	}
 
 	const connection = new Connection(config.rpcUrl, "confirmed");
 	yield* Effect.sync(() =>
-		console.log(
-			`[BOOT] pool=${config.poolAddress} position=${config.positionPubkey ?? "(monitor only)"} ` +
+		log(
+			"BOOT",
+			`pool=${config.poolAddress} position=${config.positionPubkey ?? "(monitor only)"} ` +
 				`strategy=${config.strategy} edgeBuffer=${config.edgeBufferBins} interval=${config.checkIntervalMs}ms dryRun=${config.dryRun}`,
 		),
 	);
@@ -139,6 +187,6 @@ const main: Effect.Effect<void, never> = Effect.gen(function* () {
 });
 
 Effect.runPromise(main).catch((e) => {
-	console.log(`[FATAL] ${e instanceof Error ? e.message : String(e)}`);
+	log("FATAL", e instanceof Error ? e.message : String(e));
 	process.exit(1);
 });

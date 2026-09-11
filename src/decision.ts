@@ -13,8 +13,10 @@ export interface PositionSnapshot {
 	status: PositionStatus;
 }
 
+export type LiquidityStrategy = "Spot" | "Curve" | "BidAsk";
+
 export interface RebalancePlan {
-	strategy: "Spot";
+	strategy: LiquidityStrategy;
 	maxActiveBinSlippage: number;
 }
 
@@ -24,6 +26,7 @@ export type RebalanceDecision =
 
 export interface DecidePolicy {
 	edgeBufferBins: number;
+	strategy: LiquidityStrategy;
 }
 
 export function deriveStatus(
@@ -69,7 +72,7 @@ export function decide(
 			return {
 				_tag: "Rebalance",
 				plan: {
-					strategy: "Spot",
+					strategy: policy.strategy,
 					// why: mirrors SDK MAX_ACTIVE_BIN_SLIPPAGE default; bounds how far
 					// the active bin may drift between simulation and execution.
 					maxActiveBinSlippage: 3,

@@ -1,11 +1,13 @@
 import { PublicKey } from "@solana/web3.js";
 import { Effect } from "effect";
+import type { LiquidityStrategy } from "./decision.ts";
 
 export interface BotConfig {
 	rpcUrl: string;
 	walletPrivateKey: string | null;
 	poolAddress: string;
 	positionPubkey: string | null;
+	strategy: LiquidityStrategy;
 	checkIntervalMs: number;
 	slippageBps: number;
 	dryRun: boolean;
@@ -43,6 +45,20 @@ function parseNonNegativeInt(
 		return fail(`${name} must be a non-negative integer, got "${raw}"`);
 	}
 	return Effect.succeed(n);
+}
+
+function parseStrategy(
+	raw: string | undefined,
+): Effect.Effect<LiquidityStrategy, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed("Spot");
+	const name = raw.trim().toLowerCase();
+	if (name === "spot") return Effect.succeed("Spot");
+	if (name === "curve") return Effect.succeed("Curve");
+	if (name === "bidask" || name === "bid-ask" || name === "bid_ask")
+		return Effect.succeed("BidAsk");
+	return fail(
+		`STRATEGY must be Spot, Curve, or BidAsk, got "${raw}"`,
+	);
 }
 
 function parseDryRun(raw: string | undefined): boolean {
@@ -97,6 +113,7 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 
 		const walletRaw = (env.WALLET_PRIVATE_KEY ?? "").trim();
 		const walletPrivateKey = walletRaw ? walletRaw : null;
+		const strategy = yield* parseStrategy(env.STRATEGY);
 		const checkIntervalMs = yield* parsePositiveInt(
 			env.CHECK_INTERVAL_MS,
 			60000,
@@ -118,6 +135,7 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			walletPrivateKey,
 			poolAddress,
 			positionPubkey,
+			strategy,
 			checkIntervalMs,
 			slippageBps,
 			dryRun: parseDryRun(env.DRY_RUN),

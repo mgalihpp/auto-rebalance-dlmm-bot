@@ -12,6 +12,7 @@ import { Effect } from "effect";
 import type { BotConfig } from "./config.ts";
 import {
 	deriveStatus,
+	type LiquidityStrategy,
 	type PositionSnapshot,
 	type RebalancePlan,
 } from "./decision.ts";
@@ -108,41 +109,44 @@ export interface RebalanceContext {
 
 const slippagePct = (bps: number): number => bps / 100;
 
+const toSdkStrategy: Record<LiquidityStrategy, StrategyType> = {
+	Spot: StrategyType.Spot,
+	Curve: StrategyType.Curve,
+	BidAsk: StrategyType.BidAsk,
+};
+
+export const logDryRunPlan = (
+	snapshot: PositionSnapshot,
+	plan: RebalancePlan,
+): Effect.Effect<void> =>
+	Effect.sync(() => {
+		console.log(
+			`[DRY_RUN] would rebalance pool=${snapshot.poolAddress} active=${snapshot.activeBinId} ` +
+				`oldRange=[${snapshot.lowerBinId},${snapshot.upperBinId}] ` +
+				`strategy=${plan.strategy} width follows existing position`,
+		);
+	});
+
 // Native rebalance path: simulate + rebalance_liquidity keeps the same position
 // account alive (no close/reopen), so no position rent is burned.
-export const planRebalance = (
+export const executeRebalance = (
 	ctx: RebalanceContext,
 	config: BotConfig,
 	snapshot: PositionSnapshot,
 	plan: RebalancePlan,
 ): Effect.Effect<void, DlmmError> => {
-	if (
-		config.dryRun ||
-		snapshot.lowerBinId === null ||
-		snapshot.upperBinId === null ||
-		!config.positionPubkey
-	) {
-		return Effect.sync(() => {
-			console.log(
-				`[DRY_RUN] would rebalance pool=${snapshot.poolAddress} active=${snapshot.activeBinId} ` +
-					`oldRange=[${snapshot.lowerBinId},${snapshot.upperBinId}] ` +
-					`strategy=${plan.strategy} width follows existing position`,
-			);
-		});
-	}
-
 	return Effect.tryPromise({
 		try: async () => {
 			const { connection, dlmm, owner } = ctx;
 			const position = new PublicKey(config.positionPubkey as string);
 			const { positionData } = await dlmm.getPosition(position);
 			// why: x/yWithdrawBps are the haircut kept out of redeposit, so 0 with
-			// zero top-up means full Spot recenter funded only by withdrawn amounts.
+			// zero top-up means full recenter funded only by withdrawn amounts.
 			const response =
 				await dlmm.simulateRebalancePositionWithBalancedStrategy(
 					position,
 					positionData,
-					StrategyType.Spot,
+					toSdkStrategy[plan.strategy],
 					new BN(0),
 					new BN(0),
 					new BN(0),

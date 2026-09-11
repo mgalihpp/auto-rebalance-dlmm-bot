@@ -19,6 +19,7 @@ Isi `.env` dulu:
 | `POSITION_PUBKEY` | live saja | alamat posisimu, kosong berarti mode pantau saja |
 | `WALLET_PRIVATE_KEY` | live saja | private key base58 atau JSON array, jangan commit |
 | `CHECK_INTERVAL_MS` | tidak | default 60000 |
+| `STRATEGY` | tidak | `Spot`, `Curve`, atau `BidAsk`, default `Spot` |
 | `SLIPPAGE_BPS` | tidak | default 100, cuma dipakai saat live |
 | `DRY_RUN` | tidak | default true |
 | `EDGE_BUFFER_BINS` | tidak | default 2 |
@@ -46,3 +47,5 @@ Default `DRY_RUN=true`. Bot cuma log rencana. Tidak kirim transaksi apa pun.
 Mau live, isi `WALLET_PRIVATE_KEY` dan `POSITION_PUBKEY`, lalu set `DRY_RUN=false`. Kalau salah satu kosong, bot langsung berhenti dengan pesan jelas. Dia tidak nekat jalan setengah.
 
 Live path pakai `simulateRebalancePositionWithBalancedStrategy` + `rebalancePosition`. Rebalance di tempat, posisi tidak ditutup. Fee dan slippage ikut aturan yang kamu set.
+
+Strategi ikut SDK Meteora. `Spot` rata di semua bin. `Curve` numpuk di tengah, cocok harga anteng. `BidAsk` numpuk di tepi, cocok pair volatil atau DCA. Ganti lewat `STRATEGY` tanpa ubah kode.

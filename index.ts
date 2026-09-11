@@ -5,29 +5,18 @@ import { type BotConfig, type ConfigError, loadConfig } from "./src/config.ts";
 import { decide } from "./src/decision.ts";
 import {
 	DlmmError,
+	executeRebalance,
 	fetchSnapshot,
 	loadKeypair,
-	planRebalance,
+	logDryRunPlan,
 } from "./src/dlmm.ts";
 
 const oneCycle = (
 	connection: Connection,
 	config: BotConfig,
+	owner: Keypair | null,
 ): Effect.Effect<void, never> =>
 	Effect.gen(function* () {
-		const owner = yield* loadKeypair(config.walletPrivateKey).pipe(
-			Effect.catch((e: DlmmError) =>
-				Effect.gen(function* () {
-					yield* Effect.sync(() =>
-						console.log(
-							`[WARN] wallet not loaded (${e.message}), pool-monitor mode`,
-						),
-					);
-					return null;
-				}),
-			),
-		);
-
 		const snapshot = yield* fetchSnapshot(
 			connection,
 			config.poolAddress,
@@ -50,6 +39,7 @@ const oneCycle = (
 
 		const decision = decide(snapshot, {
 			edgeBufferBins: config.edgeBufferBins,
+			strategy: config.strategy,
 		});
 		const ts = new Date().toISOString();
 		if (decision._tag === "Hold") {
@@ -64,22 +54,27 @@ const oneCycle = (
 					`[${ts}] status=${snapshot.status} active=${snapshot.activeBinId} range=[${snapshot.lowerBinId},${snapshot.upperBinId}] decision=Rebalance strategy=${decision.plan.strategy} dryRun=${config.dryRun}`,
 				),
 			);
-			if (!config.dryRun && owner && config.positionPubkey) {
-				const dlmm = yield* Effect.tryPromise({
-					try: () => DLMM.create(connection, new PublicKey(config.poolAddress)),
-					catch: (e) =>
-						new DlmmError(
-							`DLMM.create failed: ${e instanceof Error ? e.message : String(e)}`,
-						),
-				}).pipe(
+			if (config.dryRun || !owner || !config.positionPubkey) {
+				yield* logDryRunPlan(snapshot, decision.plan);
+			} else {
+				const dlmm: InstanceType<typeof DLMM> | null = yield* Effect.tryPromise(
+					{
+						try: () => DLMM.create(connection, new PublicKey(config.poolAddress)),
+						catch: (e) =>
+							new DlmmError(
+								`DLMM.create failed: ${e instanceof Error ? e.message : String(e)}`,
+							),
+					},
+				).pipe(
 					Effect.catch((e: DlmmError) =>
-						Effect.sync(() => console.log(`[ERROR] ${e.message}`)).pipe(
-							Effect.as(null as never),
-						),
+						Effect.sync(() => {
+							console.log(`[ERROR] ${e.message}`);
+							return null;
+						}),
 					),
 				);
 				if (dlmm) {
-					yield* planRebalance(
+					yield* executeRebalance(
 						{ connection, dlmm, owner },
 						config,
 						snapshot,
@@ -92,17 +87,6 @@ const oneCycle = (
 						),
 					);
 				}
-			} else {
-				yield* planRebalance(
-					{ connection, dlmm: null as never, owner: null as never },
-					{ ...config, dryRun: true },
-					snapshot,
-					decision.plan,
-				).pipe(
-					Effect.catch((e: DlmmError) =>
-						Effect.sync(() => console.log(`[ERROR] ${e.message}`)),
-					),
-				);
 			}
 		}
 	});
@@ -124,41 +108,32 @@ const main: Effect.Effect<void, never> = Effect.gen(function* () {
 	if (!maybeConfig) return;
 	const config = maybeConfig;
 
-	if (!config.dryRun) {
-		const liveKey = yield* loadKeypair(config.walletPrivateKey).pipe(
-			Effect.map((k): Keypair | null => k),
-			Effect.catch((e: DlmmError) =>
-				Effect.sync(() => {
-					console.log(`[CONFIG] invalid wallet: ${e.message}. Exiting 1.`);
-					process.exit(1);
-					return null;
-				}),
-			),
+	const owner = yield* loadKeypair(config.walletPrivateKey).pipe(
+		Effect.map((k): Keypair | null => k),
+		Effect.catch((e: DlmmError) =>
+			Effect.sync(() => {
+				console.log(`[WARN] wallet not loaded (${e.message}), pool-monitor mode`);
+				return null;
+			}),
+		),
+	);
+	if (!config.dryRun && (!owner || !config.positionPubkey)) {
+		console.log(
+			"[CONFIG] DRY_RUN=false needs a valid WALLET_PRIVATE_KEY and POSITION_PUBKEY. Set them or keep DRY_RUN=true. Exiting 1.",
 		);
-		if (!liveKey) {
-			console.log(
-				"[CONFIG] DRY_RUN=false needs WALLET_PRIVATE_KEY. Set it or keep DRY_RUN=true. Exiting 1.",
-			);
-			process.exit(1);
-		}
-		if (!config.positionPubkey) {
-			console.log(
-				"[CONFIG] DRY_RUN=false needs POSITION_PUBKEY. Set it or keep DRY_RUN=true. Exiting 1.",
-			);
-			process.exit(1);
-		}
+		process.exit(1);
 	}
 
 	const connection = new Connection(config.rpcUrl, "confirmed");
 	yield* Effect.sync(() =>
 		console.log(
 			`[BOOT] pool=${config.poolAddress} position=${config.positionPubkey ?? "(monitor only)"} ` +
-				`edgeBuffer=${config.edgeBufferBins} interval=${config.checkIntervalMs}ms dryRun=${config.dryRun}`,
+				`strategy=${config.strategy} edgeBuffer=${config.edgeBufferBins} interval=${config.checkIntervalMs}ms dryRun=${config.dryRun}`,
 		),
 	);
 
 	while (true) {
-		yield* oneCycle(connection, config);
+		yield* oneCycle(connection, config, owner);
 		yield* Effect.sleep(Duration.millis(config.checkIntervalMs));
 	}
 });

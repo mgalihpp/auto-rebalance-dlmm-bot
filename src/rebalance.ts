@@ -27,7 +27,7 @@ import {
 	sdkStrategyOf,
 	slippagePct,
 } from "./dlmm.ts";
-import { formatDryRunBox, log, paint, txLink } from "./log.ts";
+import type { BundleLeg, BundleStatus, JitoError } from "./jito.ts";
 import {
 	assertBundlePlan,
 	formatBundlePlan,
@@ -37,12 +37,12 @@ import {
 	sendBundle as sendJitoBundle,
 	simulateBundle as simulateJitoBundle,
 } from "./jito.ts";
-import type { BundleLeg, BundleStatus, JitoError } from "./jito.ts";
+import { formatDryRunBox, log, paint, txLink } from "./log.ts";
 import {
 	executeJupiterOrder,
 	getJupiterOrder,
-	signJupiterOrder,
 	type SwapError,
+	signJupiterOrder,
 } from "./swap.ts";
 
 export const involvesSolMint = (mintX: string, mintY: string): boolean =>
@@ -150,8 +150,12 @@ export const capTopUpToBalances = (args: {
 	readonly balanceY: string;
 }): { readonly topUpX: string; readonly topUpY: string } => {
 	if (
-		mustBaseUnit(args.topUpX, "topUpX").gt(mustBaseUnit(args.balanceX, "balanceX")) ||
-		mustBaseUnit(args.topUpY, "topUpY").gt(mustBaseUnit(args.balanceY, "balanceY"))
+		mustBaseUnit(args.topUpX, "topUpX").gt(
+			mustBaseUnit(args.balanceX, "balanceX"),
+		) ||
+		mustBaseUnit(args.topUpY, "topUpY").gt(
+			mustBaseUnit(args.balanceY, "balanceY"),
+		)
 	) {
 		throw new DlmmError(
 			`topUp ${args.topUpX}/${args.topUpY} exceeds ATA balances ` +
@@ -823,8 +827,7 @@ export const completeRebalanceFromWallet = (
 					balanceX: walletAfterX.toString(),
 					balanceY: walletAfterY.toString(),
 				}),
-			catch: (e) =>
-				e instanceof DlmmError ? e : new DlmmError(String(e)),
+			catch: (e) => (e instanceof DlmmError ? e : new DlmmError(String(e))),
 		});
 		const emptied = yield* Effect.tryPromise({
 			try: () => dlmm.getPosition(positionAddress),
@@ -926,9 +929,7 @@ export const logDryRunBundlePlan = (
 		);
 	});
 
-type LbPosition = Awaited<
-	ReturnType<RebalanceContext["dlmm"]["getPosition"]>
->;
+type LbPosition = Awaited<ReturnType<RebalanceContext["dlmm"]["getPosition"]>>;
 
 export interface JitoBundleAttempt {
 	readonly ctx: RebalanceContext;
@@ -947,9 +948,7 @@ const jitoToDlmm = (e: JitoError): DlmmError =>
 const asDlmm = (e: unknown): DlmmError =>
 	e instanceof DlmmError
 		? e
-		: new DlmmError(
-				`jito: ${e instanceof Error ? e.message : String(e)}`,
-			);
+		: new DlmmError(`jito: ${e instanceof Error ? e.message : String(e)}`);
 
 const signLegacyB64 = (
 	tx: Transaction,
@@ -1016,7 +1015,10 @@ export const attemptJitoBundle = (
 			slippageBps: config.swapSlippageBps,
 		});
 
-		const beforeSol = mustBaseUnit(walletBefore.sol, "walletBeforeSol").toNumber();
+		const beforeSol = mustBaseUnit(
+			walletBefore.sol,
+			"walletBeforeSol",
+		).toNumber();
 		const floorLamports =
 			Math.max(config.solReserveLamports, beforeSol) + TX_FEE_BUFFER_LAMPORTS;
 		const needsWrap = involvesSolMint(
@@ -1107,7 +1109,11 @@ export const attemptJitoBundle = (
 			);
 			preLegs.push({
 				label: "wrap",
-				txB64: yield* signLegacyB64(new Transaction().add(...ixs), owner, blockhash),
+				txB64: yield* signLegacyB64(
+					new Transaction().add(...ixs),
+					owner,
+					blockhash,
+				),
 			});
 		}
 
@@ -1230,10 +1236,7 @@ export const attemptJitoBundle = (
 		if (config.dryRun) {
 			yield* Effect.sync(() =>
 				console.log(
-					paint(
-						"DRY_RUN",
-						`${formatBundlePlan(bundlePlan)}\n  (nothing sent)`,
-					),
+					paint("DRY_RUN", `${formatBundlePlan(bundlePlan)}\n  (nothing sent)`),
 				),
 			);
 			return true;
@@ -1266,10 +1269,7 @@ export const attemptJitoBundle = (
 		state = final;
 		if (state._tag === "Landed") {
 			yield* Effect.sync(() =>
-				log(
-					"LIVE",
-					`jito bundle landed ${bundleId} slot=${state.slot ?? "?"}`,
-				),
+				log("LIVE", `jito bundle landed ${bundleId} slot=${state.slot ?? "?"}`),
 			);
 			return true;
 		}
@@ -1352,7 +1352,10 @@ export const executeRebalance = (
 			}).pipe(
 				Effect.catch((e: DlmmError) =>
 					Effect.sync(() => {
-						log("WARN", `jito bundle skipped (${e.message}), sequential fallback`);
+						log(
+							"WARN",
+							`jito bundle skipped (${e.message}), sequential fallback`,
+						);
 						return false;
 					}),
 				),

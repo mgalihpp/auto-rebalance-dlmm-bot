@@ -80,7 +80,10 @@ export const assertBundlePlan = (plan: BundlePlan): BundlePlan => {
 		assertBase64Tx(leg.txB64, `bundle leg ${leg.label}`);
 	});
 	assertTipAccount(plan.tipAccount);
-	if (!Number.isInteger(plan.tipLamports) || plan.tipLamports < JITO_MIN_TIP_LAMPORTS) {
+	if (
+		!Number.isInteger(plan.tipLamports) ||
+		plan.tipLamports < JITO_MIN_TIP_LAMPORTS
+	) {
 		throw new JitoError(
 			`tip must be an integer >= ${JITO_MIN_TIP_LAMPORTS} lamports, got ${plan.tipLamports}`,
 		);
@@ -102,7 +105,9 @@ export const pickTipAccount = (
 };
 
 const TipArraySchema = Schema.Array(Schema.String);
-const TipEnvelopeSchema = Schema.Struct({ result: Schema.Array(Schema.String) });
+const TipEnvelopeSchema = Schema.Struct({
+	result: Schema.Array(Schema.String),
+});
 const decodeTipArray = Schema.decodeUnknownSync(TipArraySchema);
 const decodeTipEnvelope = Schema.decodeUnknownSync(TipEnvelopeSchema);
 
@@ -224,8 +229,7 @@ export const parseInflightStatusResponse = (json: unknown): InflightStatus => {
 
 export const formatBundlePlan = (plan: BundlePlan): string => {
 	const lines = plan.legs.map(
-		(leg, i) =>
-			`  [${i}] ${leg.label} (${leg.txB64.trim().length} b64 chars)`,
+		(leg, i) => `  [${i}] ${leg.label} (${leg.txB64.trim().length} b64 chars)`,
 	);
 	return [
 		`bundle plan: ${plan.legs.length} tx(s), tip ${(plan.tipLamports / 1e9).toFixed(9)} SOL -> ${plan.tipAccount}`,
@@ -287,7 +291,10 @@ export const simulateBundle = (args: {
 	readonly transactions: readonly string[];
 }): Effect.Effect<void, JitoError> =>
 	Effect.gen(function* () {
-		if (args.transactions.length === 0 || args.transactions.length > JITO_MAX_TXS) {
+		if (
+			args.transactions.length === 0 ||
+			args.transactions.length > JITO_MAX_TXS
+		) {
 			return yield* Effect.fail(
 				new JitoError(
 					`simulateBundle: need 1-${JITO_MAX_TXS} transactions, got ${args.transactions.length}`,
@@ -308,7 +315,10 @@ export const sendBundle = (args: {
 	readonly transactions: readonly string[];
 }): Effect.Effect<string, JitoError> =>
 	Effect.gen(function* () {
-		if (args.transactions.length === 0 || args.transactions.length > JITO_MAX_TXS) {
+		if (
+			args.transactions.length === 0 ||
+			args.transactions.length > JITO_MAX_TXS
+		) {
 			return yield* Effect.fail(
 				new JitoError(
 					`sendBundle: need 1-${JITO_MAX_TXS} transactions, got ${args.transactions.length}`,
@@ -358,9 +368,11 @@ export const pollBundleStatus = (args: {
 		const intervalMs = args.intervalMs ?? JITO_POLL_INTERVAL_MS;
 		const deadline = Date.now() + timeoutMs;
 		for (;;) {
-			const outcome: { readonly ok: true; readonly found: InflightStatus } | {
-				readonly ok: false;
-			} = yield* fetchBundleStatusOnce({
+			const outcome:
+				| { readonly ok: true; readonly found: InflightStatus }
+				| {
+						readonly ok: false;
+				  } = yield* fetchBundleStatusOnce({
 				blockEngineUrl: args.blockEngineUrl,
 				bundleId: args.bundleId,
 			}).pipe(

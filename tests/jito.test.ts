@@ -76,7 +76,10 @@ describe("parseSendBundleResponse", () => {
 
 	it("rejects empty ids", () => {
 		expectJitoError(() => parseSendBundleResponse("  "), "empty bundle");
-		expectJitoError(() => parseSendBundleResponse({ result: "" }), "empty bundle");
+		expectJitoError(
+			() => parseSendBundleResponse({ result: "" }),
+			"empty bundle",
+		);
 	});
 });
 
@@ -93,7 +96,9 @@ describe("parseSimulateBundleResponse", () => {
 	});
 
 	it("accepts payloads without a summary when no error is set", () => {
-		expect(parseSimulateBundleResponse({ result: { value: {} } })).toBeUndefined();
+		expect(
+			parseSimulateBundleResponse({ result: { value: {} } }),
+		).toBeUndefined();
 	});
 
 	it("fails on RPC error fields", () => {
@@ -156,10 +161,7 @@ describe("assertBundlePlan", () => {
 	});
 
 	it("rejects empty and oversized leg lists", () => {
-		expectJitoError(
-			() => assertBundlePlan({ ...plan, legs: [] }),
-			"no legs",
-		);
+		expectJitoError(() => assertBundlePlan({ ...plan, legs: [] }), "no legs");
 		expectJitoError(
 			() =>
 				assertBundlePlan({

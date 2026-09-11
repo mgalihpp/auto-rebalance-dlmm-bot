@@ -1,4 +1,4 @@
-import { PublicKey, type Keypair, VersionedTransaction } from "@solana/web3.js";
+import { type Keypair, PublicKey, VersionedTransaction } from "@solana/web3.js";
 import { Effect, Schedule, Schema } from "effect";
 import {
 	FetchHttpClient,
@@ -268,7 +268,10 @@ export const signJupiterOrder = (
 		try: () => {
 			const tx = VersionedTransaction.deserialize(
 				Uint8Array.from(
-					Buffer.from(assertBase64(args.transactionB64, "Jupiter order"), "base64"),
+					Buffer.from(
+						assertBase64(args.transactionB64, "Jupiter order"),
+						"base64",
+					),
 				),
 			);
 			tx.sign([args.owner]);

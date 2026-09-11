@@ -8,6 +8,7 @@ import {
 	type RebalancePlan,
 } from "./src/decision.ts";
 import { DlmmError, fetchSnapshot, loadKeypair } from "./src/dlmm.ts";
+import { getTipAccounts, JitoError, pickTipAccount } from "./src/jito.ts";
 import { log } from "./src/log.ts";
 import {
 	executeRebalance,
@@ -16,11 +17,6 @@ import {
 	logDryRunBundlePlan,
 	previewBalancedPlan,
 } from "./src/rebalance.ts";
-import {
-	getTipAccounts,
-	JitoError,
-	pickTipAccount,
-} from "./src/jito.ts";
 
 const logJitoDryRun = (
 	config: BotConfig,

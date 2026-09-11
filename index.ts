@@ -11,9 +11,42 @@ import { DlmmError, fetchSnapshot, loadKeypair } from "./src/dlmm.ts";
 import { log } from "./src/log.ts";
 import {
 	executeRebalance,
+	involvesSolMint,
 	logDryRunBalancedPlan,
+	logDryRunBundlePlan,
 	previewBalancedPlan,
 } from "./src/rebalance.ts";
+import {
+	getTipAccounts,
+	JitoError,
+	pickTipAccount,
+} from "./src/jito.ts";
+
+const logJitoDryRun = (
+	config: BotConfig,
+	dlmm: InstanceType<typeof DLMM>,
+	swap: Parameters<typeof logDryRunBundlePlan>[0]["swap"],
+): Effect.Effect<void, never> =>
+	getTipAccounts({ blockEngineUrl: config.jitoBlockEngineUrl }).pipe(
+		Effect.flatMap((accs) =>
+			Effect.try({
+				try: () => pickTipAccount(accs),
+				catch: (e) => (e instanceof JitoError ? e : new JitoError(String(e))),
+			}),
+		),
+		Effect.catch(() => Effect.succeed(null)),
+		Effect.flatMap((tip) =>
+			logDryRunBundlePlan({
+				swap,
+				involvesSol: involvesSolMint(
+					dlmm.tokenX.publicKey.toBase58(),
+					dlmm.tokenY.publicKey.toBase58(),
+				),
+				tipAccount: tip,
+				tipLamports: config.jitoTipLamports,
+			}),
+		),
+	);
 
 const logPlanDryRun = (
 	connection: Connection,
@@ -50,6 +83,12 @@ const logPlanDryRun = (
 					config.compoundFees
 						? undefined
 						: { feeX: balancedPlan.feeX, feeY: balancedPlan.feeY },
+				).pipe(
+					Effect.flatMap(() =>
+						config.jitoEnabled
+							? logJitoDryRun(config, dlmm, balancedPlan.swap)
+							: Effect.void,
+					),
 				),
 			),
 			Effect.catch((e: DlmmError) =>

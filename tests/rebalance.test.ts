@@ -11,6 +11,8 @@ import {
 	capTopUpToBalances,
 	deriveTopUp,
 	excludeFees,
+	involvesSolMint,
+	logDryRunBundlePlan,
 	resolveWidth,
 	sizeFromWalletDelta,
 	wrapAmountAboveFloor,
@@ -315,6 +317,72 @@ describe("wrapAmountAboveFloor", () => {
 				floorLamports: "130794000",
 			}),
 		).toBe("0");
+	});
+});
+
+describe("involvesSolMint", () => {
+	it("detects wSOL on either side", () => {
+		expect(involvesSolMint(X_MINT, Y_MINT)).toBe(true);
+		expect(involvesSolMint(Y_MINT, X_MINT)).toBe(true);
+	});
+
+	it("is false without wSOL", () => {
+		expect(involvesSolMint(Y_MINT, Y_MINT)).toBe(false);
+	});
+});
+
+describe("logDryRunBundlePlan", () => {
+	it("prints leg labels with the tip and sends nothing", async () => {
+		const lines: string[] = [];
+		const orig = console.log;
+		console.log = (msg: string): void => {
+			lines.push(msg);
+		};
+		try {
+			await Effect.runPromise(
+				logDryRunBundlePlan({
+					swap: {
+						kind: "swap",
+						inputMint: X_MINT,
+						outputMint: Y_MINT,
+						inAmount: "500",
+						outAmountMin: "495",
+					},
+					involvesSol: true,
+					tipAccount: "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+					tipLamports: 500_000,
+				}),
+			);
+		} finally {
+			console.log = orig;
+		}
+		const out = lines.join("\n");
+		expect(out).toContain("withdraw");
+		expect(out).toContain("wrap?");
+		expect(out).toContain("swap(signed)");
+		expect(out).toContain("deposit+tip-last");
+		expect(out).toContain("nothing sent");
+	});
+
+	it("notes an unavailable tip account", async () => {
+		const lines: string[] = [];
+		const orig = console.log;
+		console.log = (msg: string): void => {
+			lines.push(msg);
+		};
+		try {
+			await Effect.runPromise(
+				logDryRunBundlePlan({
+					swap: { kind: "none" },
+					involvesSol: false,
+					tipAccount: null,
+					tipLamports: 500_000,
+				}),
+			);
+		} finally {
+			console.log = orig;
+		}
+		expect(lines.join("\n")).toContain("tip account unavailable");
 	});
 });
 

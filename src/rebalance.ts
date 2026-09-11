@@ -29,10 +29,24 @@ import {
 } from "./dlmm.ts";
 import { formatDryRunBox, log, paint, txLink } from "./log.ts";
 import {
+	assertBundlePlan,
+	formatBundlePlan,
+	getTipAccounts,
+	pickTipAccount,
+	pollBundleStatus,
+	sendBundle as sendJitoBundle,
+	simulateBundle as simulateJitoBundle,
+} from "./jito.ts";
+import type { BundleLeg, BundleStatus, JitoError } from "./jito.ts";
+import {
 	executeJupiterOrder,
 	getJupiterOrder,
+	signJupiterOrder,
 	type SwapError,
 } from "./swap.ts";
+
+export const involvesSolMint = (mintX: string, mintY: string): boolean =>
+	mintX === NATIVE_MINT || mintY === NATIVE_MINT;
 
 export type SwapDirection =
 	| { readonly kind: "none" }
@@ -881,6 +895,394 @@ export const completeRebalanceFromWallet = (
 		);
 	});
 
+export interface DryRunBundleSketch {
+	readonly swap: SwapDirection;
+	readonly involvesSol: boolean;
+	readonly tipAccount: string | null;
+	readonly tipLamports: number;
+}
+
+export const logDryRunBundlePlan = (
+	sketch: DryRunBundleSketch,
+): Effect.Effect<void> =>
+	Effect.sync(() => {
+		const legs = [
+			"withdraw",
+			...(sketch.involvesSol ? ["wrap?"] : []),
+			...(sketch.swap.kind === "swap" ? ["swap(signed)"] : []),
+			"deposit+tip-last",
+		];
+		console.log(
+			paint(
+				"DRY_RUN",
+				[
+					"jito bundle plan (nothing sent):",
+					...legs.map((label, i) => `  [${i}] ${label}`),
+					sketch.tipAccount
+						? `  tip ${(sketch.tipLamports / 1e9).toFixed(9)} SOL -> ${sketch.tipAccount} (in last tx)`
+						: "  tip account unavailable",
+				].join("\n"),
+			),
+		);
+	});
+
+type LbPosition = Awaited<
+	ReturnType<RebalanceContext["dlmm"]["getPosition"]>
+>;
+
+export interface JitoBundleAttempt {
+	readonly ctx: RebalanceContext;
+	readonly config: BotConfig;
+	readonly snapshot: PositionSnapshot;
+	readonly plan: RebalancePlan;
+	readonly walletBefore: WalletSnapshot;
+	readonly lbPosition: LbPosition;
+	readonly feeXStr: string;
+	readonly feeYStr: string;
+}
+
+const jitoToDlmm = (e: JitoError): DlmmError =>
+	new DlmmError(`jito: ${e.message}`);
+
+const asDlmm = (e: unknown): DlmmError =>
+	e instanceof DlmmError
+		? e
+		: new DlmmError(
+				`jito: ${e instanceof Error ? e.message : String(e)}`,
+			);
+
+const signLegacyB64 = (
+	tx: Transaction,
+	owner: Keypair,
+	blockhash: string,
+): Effect.Effect<string, DlmmError> =>
+	Effect.try({
+		try: () => {
+			tx.feePayer = owner.publicKey;
+			tx.recentBlockhash = blockhash;
+			tx.sign(owner);
+			return Buffer.from(tx.serialize()).toString("base64");
+		},
+		catch: (e) =>
+			new DlmmError(
+				`sign legacy failed: ${e instanceof Error ? e.message : String(e)}`,
+			),
+	});
+
+// why: the bundle is sized from pre-withdraw position totals plus the
+// quoted swap out, never from wallet reads. A quote that misses slippage
+// fails the whole bundle atomically, so the sequential path stays untouched
+// as the fallback.
+export const attemptJitoBundle = (
+	args: JitoBundleAttempt,
+): Effect.Effect<boolean, DlmmError> =>
+	Effect.gen(function* () {
+		const { ctx, config, snapshot, plan, walletBefore, lbPosition } = args;
+		const { connection, dlmm, owner } = ctx;
+		if (!config.positionPubkey)
+			return yield* dlmmFail("POSITION_PUBKEY missing, abort rebalance");
+		const positionAddress = new PublicKey(config.positionPubkey);
+		const tokenXMint = dlmm.tokenX.publicKey;
+		const tokenYMint = dlmm.tokenY.publicKey;
+		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
+		const positionData = lbPosition.positionData;
+
+		const sizedX = config.compoundFees
+			? addBaseUnits(positionData.totalXAmount, args.feeXStr)
+			: positionData.totalXAmount;
+		const sizedY = config.compoundFees
+			? addBaseUnits(positionData.totalYAmount, args.feeYStr)
+			: positionData.totalYAmount;
+		const active = yield* Effect.tryPromise({
+			try: () => dlmm.getActiveBin(),
+			catch: (e) =>
+				new DlmmError(
+					`getActiveBin failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const balancedPlan = yield* computeBalancedPlan({
+			activeBinId: snapshot.activeBinId,
+			widthBins: resolveWidth(
+				snapshot.lowerBinId,
+				snapshot.upperBinId,
+				config.positionWidthBins,
+			),
+			strategy: plan.strategy,
+			tokenXMint: tokenXMint.toBase58(),
+			tokenYMint: tokenYMint.toBase58(),
+			withdrawnX: sizedX,
+			withdrawnY: sizedY,
+			activePrice: active.price,
+			slippageBps: config.swapSlippageBps,
+		});
+
+		const beforeSol = mustBaseUnit(walletBefore.sol, "walletBeforeSol").toNumber();
+		const floorLamports =
+			Math.max(config.solReserveLamports, beforeSol) + TX_FEE_BUFFER_LAMPORTS;
+		const needsWrap = involvesSolMint(
+			tokenXMint.toBase58(),
+			tokenYMint.toBase58(),
+		);
+		const native = yield* Effect.tryPromise({
+			try: () => connection.getBalance(owner.publicKey),
+			catch: (e) =>
+				new DlmmError(
+					`native SOL read failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		if (native < config.solReserveLamports) {
+			return yield* dlmmFail(
+				`native SOL ${(native / 1e9).toFixed(6)} below reserve ` +
+					`${(config.solReserveLamports / 1e9).toFixed(6)}: top up gas, abort rebalance`,
+			);
+		}
+		const wrapAmount = needsWrap
+			? wrapAmountAboveFloor({
+					nativeLamports: String(native),
+					floorLamports: String(floorLamports),
+				})
+			: "0";
+
+		const { blockhash } = yield* Effect.tryPromise({
+			try: () => connection.getLatestBlockhash("confirmed"),
+			catch: (e) =>
+				new DlmmError(
+					`getLatestBlockhash failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const removeTxs = yield* Effect.tryPromise({
+			try: () =>
+				dlmm.removeLiquidity({
+					user: owner.publicKey,
+					position: positionAddress,
+					fromBinId: positionData.lowerBinId,
+					toBinId: positionData.upperBinId,
+					bps: new BN(10000),
+					shouldClaimAndClose: false,
+				}),
+			catch: (e) =>
+				new DlmmError(
+					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const withdrawLegs: BundleLeg[] = [];
+		for (const [i, tx] of removeTxs.entries()) {
+			const txB64 = yield* signLegacyB64(tx, owner, blockhash);
+			withdrawLegs.push({
+				label: removeTxs.length > 1 ? `withdraw-${i}` : "withdraw",
+				txB64,
+			});
+		}
+		const preLegs: BundleLeg[] = [];
+		if (wrapAmount !== "0") {
+			const wsolAta = getAssociatedTokenAddressSync(
+				new PublicKey(NATIVE_MINT),
+				owner.publicKey,
+			);
+			const ata = yield* Effect.tryPromise({
+				try: () => connection.getAccountInfo(wsolAta),
+				catch: (e) =>
+					new DlmmError(
+						`wSOL ATA read failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			const ixs: TransactionInstruction[] = [];
+			if (!ata) {
+				ixs.push(
+					createAssociatedTokenAccountInstruction(
+						owner.publicKey,
+						wsolAta,
+						owner.publicKey,
+						new PublicKey(NATIVE_MINT),
+					),
+				);
+			}
+			ixs.push(
+				SystemProgram.transfer({
+					fromPubkey: owner.publicKey,
+					toPubkey: wsolAta,
+					lamports: BigInt(wrapAmount),
+				}),
+				createSyncNativeInstruction(wsolAta),
+			);
+			preLegs.push({
+				label: "wrap",
+				txB64: yield* signLegacyB64(new Transaction().add(...ixs), owner, blockhash),
+			});
+		}
+
+		let depositX = balancedPlan.depositX;
+		let depositY = balancedPlan.depositY;
+		const swapLegs: BundleLeg[] = [];
+		if (balancedPlan.swap.kind === "swap") {
+			const ordered = yield* getJupiterOrder({
+				inputMint: balancedPlan.swap.inputMint,
+				outputMint: balancedPlan.swap.outputMint,
+				amount: balancedPlan.swap.inAmount,
+				slippageBps: config.swapSlippageBps,
+				taker: owner.publicKey.toBase58(),
+			}).pipe(Effect.mapError(swapErrToDlmm));
+			if (
+				mustBaseUnit(ordered.order.outAmount, "jupiterOut").lt(
+					mustBaseUnit(balancedPlan.swap.outAmountMin, "outMin"),
+				)
+			) {
+				return yield* dlmmFail(
+					`jupiter out ${ordered.order.outAmount} below min ` +
+						`${balancedPlan.swap.outAmountMin}, fallback to sequential`,
+				);
+			}
+			const signedB64 = yield* signJupiterOrder({
+				transactionB64: ordered.transactionB64,
+				owner,
+			}).pipe(Effect.mapError(swapErrToDlmm));
+			swapLegs.push({ label: "swap", txB64: signedB64 });
+			if (balancedPlan.swap.outputMint === tokenXMint.toBase58()) {
+				depositX = addBaseUnits(sizedX, ordered.order.outAmount);
+			} else {
+				depositY = addBaseUnits(sizedY, ordered.order.outAmount);
+			}
+			yield* Effect.sync(() =>
+				log(
+					"LIVE",
+					`jito swap router=${ordered.order.router} mode=${ordered.order.mode} ` +
+						`out=${ordered.order.outAmount}`,
+				),
+			);
+		}
+
+		const response = yield* Effect.tryPromise({
+			try: () =>
+				dlmm.simulateRebalancePositionWithBalancedStrategy(
+					positionAddress,
+					positionData,
+					sdkStrategy,
+					new BN(depositX),
+					new BN(depositY),
+					new BN(FULL_HAIRCUT_BPS),
+					new BN(FULL_HAIRCUT_BPS),
+				),
+			catch: (e) =>
+				new DlmmError(
+					`simulate rebalance failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const { initBinArrayInstructions, rebalancePositionInstruction } =
+			yield* Effect.tryPromise({
+				try: () =>
+					dlmm.rebalancePosition(
+						response,
+						new BN(REBALANCE_ACTIVE_BIN_SLIPPAGE),
+						owner.publicKey,
+						slippagePct(config.slippageBps),
+					),
+				catch: (e) =>
+					new DlmmError(
+						`rebalancePosition failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+		const midLegs: BundleLeg[] = [];
+		if (initBinArrayInstructions.length > 0) {
+			midLegs.push({
+				label: "initBinArray",
+				txB64: yield* signLegacyB64(
+					new Transaction().add(...initBinArrayInstructions),
+					owner,
+					blockhash,
+				),
+			});
+		}
+		const tipAccounts = yield* getTipAccounts({
+			blockEngineUrl: config.jitoBlockEngineUrl,
+		}).pipe(Effect.mapError(jitoToDlmm));
+		const tipAccount = yield* Effect.try({
+			try: () => pickTipAccount(tipAccounts),
+			catch: asDlmm,
+		});
+		const lastTx = new Transaction().add(
+			...rebalancePositionInstruction,
+			SystemProgram.transfer({
+				fromPubkey: owner.publicKey,
+				toPubkey: new PublicKey(tipAccount),
+				lamports: config.jitoTipLamports,
+			}),
+		);
+		const bundleLegs: readonly BundleLeg[] = [
+			...withdrawLegs,
+			...preLegs,
+			...swapLegs,
+			...midLegs,
+			{
+				label: "deposit+tip",
+				txB64: yield* signLegacyB64(lastTx, owner, blockhash),
+			},
+		];
+		const bundlePlan = {
+			legs: bundleLegs,
+			tipAccount,
+			tipLamports: config.jitoTipLamports,
+		};
+		yield* Effect.try({
+			try: () => assertBundlePlan(bundlePlan),
+			catch: asDlmm,
+		});
+
+		if (config.dryRun) {
+			yield* Effect.sync(() =>
+				console.log(
+					paint(
+						"DRY_RUN",
+						`${formatBundlePlan(bundlePlan)}\n  (nothing sent)`,
+					),
+				),
+			);
+			return true;
+		}
+
+		let state: BundleStatus = { _tag: "Built" };
+		const txB64s = bundlePlan.legs.map((l) => l.txB64);
+		yield* simulateJitoBundle({
+			blockEngineUrl: config.jitoBlockEngineUrl,
+			transactions: txB64s,
+		}).pipe(Effect.mapError(jitoToDlmm));
+		state = { _tag: "SimulatedOk" };
+		yield* Effect.sync(() =>
+			log("LIVE", `jito bundle simulated ok (${txB64s.length} txs)`),
+		);
+		const bundleId = yield* sendJitoBundle({
+			blockEngineUrl: config.jitoBlockEngineUrl,
+			transactions: txB64s,
+		}).pipe(Effect.mapError(jitoToDlmm));
+		state = { _tag: "Sent", bundleId };
+		yield* Effect.sync(() => log("LIVE", `jito bundle sent ${bundleId}`));
+		const final: BundleStatus = yield* pollBundleStatus({
+			blockEngineUrl: config.jitoBlockEngineUrl,
+			bundleId,
+		}).pipe(
+			Effect.catch((e: JitoError) =>
+				dlmmFail(`jito poll failed (${e.message}), fallback to sequential`),
+			),
+		);
+		state = final;
+		if (state._tag === "Landed") {
+			yield* Effect.sync(() =>
+				log(
+					"LIVE",
+					`jito bundle landed ${bundleId} slot=${state.slot ?? "?"}`,
+				),
+			);
+			return true;
+		}
+		if (state._tag === "Failed") {
+			return yield* dlmmFail(
+				`jito bundle ${bundleId} failed (${state.reason}), fallback to sequential`,
+			);
+		}
+		return yield* dlmmFail(
+			`jito bundle ${bundleId} timed out, fallback to sequential`,
+		);
+	});
+
 export const executeRebalance = (
 	ctx: RebalanceContext,
 	config: BotConfig,
@@ -930,6 +1332,33 @@ export const executeRebalance = (
 					`wallet SOL snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
+
+		// Atomic path first when opted in; any bundle failure falls back to
+		// the sequential flow below, unchanged.
+		if (config.jitoEnabled) {
+			const landed = yield* attemptJitoBundle({
+				ctx,
+				config,
+				snapshot,
+				plan,
+				walletBefore: {
+					x: walletBeforeX.toString(),
+					y: walletBeforeY.toString(),
+					sol: String(walletBeforeSol),
+				},
+				lbPosition,
+				feeXStr,
+				feeYStr,
+			}).pipe(
+				Effect.catch((e: DlmmError) =>
+					Effect.sync(() => {
+						log("WARN", `jito bundle skipped (${e.message}), sequential fallback`);
+						return false;
+					}),
+				),
+			);
+			if (landed) return;
+		}
 
 		// 2. Withdraw 100% but keep the position account alive.
 		const removeTxs = yield* Effect.tryPromise({

@@ -15,6 +15,76 @@ export class DlmmError extends Data.TaggedError("DlmmError")<{
 	message: string;
 }> {}
 
+export type PositionAmount = string | number | BN;
+
+export interface PositionCandidate {
+	publicKey: { toBase58(): string };
+	positionData: {
+		totalXAmount: PositionAmount;
+		totalYAmount: PositionAmount;
+		feeX?: PositionAmount;
+		feeY?: PositionAmount;
+	};
+}
+
+function toAmount(value: PositionAmount | undefined): BN {
+	if (value === undefined) return new BN(0);
+	if (typeof value === "number") return new BN(Math.trunc(value));
+	if (typeof value === "string") {
+		const text = value.trim();
+		if (text === "" || text === "-" || text === ".") return new BN(0);
+		const dot = text.indexOf(".");
+		const head = dot < 0 ? text : text.slice(0, dot);
+		if (head === "" || head === "-") return new BN(0);
+		return new BN(head);
+	}
+	return value;
+}
+
+function isFunded(candidate: PositionCandidate): boolean {
+	const total = toAmount(candidate.positionData.totalXAmount)
+		.add(toAmount(candidate.positionData.totalYAmount))
+		.add(toAmount(candidate.positionData.feeX))
+		.add(toAmount(candidate.positionData.feeY));
+	return total.gt(new BN(0));
+}
+
+export function resolvePosition<T extends PositionCandidate>(
+	candidates: T[],
+	wanted?: string,
+): T {
+	if (wanted) {
+		const found = candidates.find((c) => c.publicKey.toBase58() === wanted);
+		if (found !== undefined) return found;
+		throw new DlmmError({
+			message: `pinned position ${wanted} not found among ${candidates.length} position(s) in this pool; it may have been closed by a prior rebalance — unset POSITION_ADDRESS to auto-select the funded position`,
+		});
+	}
+	if (candidates.length === 0) {
+		throw new DlmmError({
+			message: "no DLMM position found for owner in this pool",
+		});
+	}
+	const funded = candidates.filter(isFunded);
+	if (funded.length === 0) {
+		throw new DlmmError({
+			message: "no DLMM position found for owner in this pool",
+		});
+	}
+	if (funded.length === 1) {
+		const pick = funded[0];
+		if (pick === undefined) {
+			throw new DlmmError({
+				message: "no DLMM position found for owner in this pool",
+			});
+		}
+		return pick;
+	}
+	throw new DlmmError({
+		message: `multiple funded positions found in this pool: ${funded.map((c) => c.publicKey.toBase58()).join(", ")}; pin one via POSITION_ADDRESS`,
+	});
+}
+
 export interface LoadStateInput {
 	connection: Connection;
 	poolAddress: string;
@@ -106,15 +176,29 @@ export function loadPositionState(
 		let position: LbPosition | undefined;
 		if (input.positionAddress) {
 			const wanted = input.positionAddress;
-			position = userPositions.find((p) => p.publicKey.toBase58() === wanted);
-			if (position === undefined) {
+			if (userPositions.some((p) => p.publicKey.toBase58() === wanted)) {
+				position = yield* Effect.try({
+					try: () => resolvePosition(userPositions, wanted),
+					catch: (error) =>
+						error instanceof DlmmError ? error : toDlmmError(error),
+				});
+			} else {
+				// A prior rebalance closes the old position, so a stale pin may still resolve on-chain.
 				position = yield* Effect.tryPromise({
 					try: () => dlmm.getPosition(new PublicKey(wanted)),
 					catch: toDlmmError,
 				});
 			}
 		} else {
-			position = userPositions[0];
+			const selected = yield* Effect.try({
+				try: () => resolvePosition(userPositions),
+				catch: (error) =>
+					error instanceof DlmmError ? error : toDlmmError(error),
+			});
+			console.log(
+				`Auto-selected position ${selected.publicKey.toBase58()} (${userPositions.length} position(s) in pool)`,
+			);
+			position = selected;
 		}
 		if (position === undefined) {
 			return yield* Effect.fail(

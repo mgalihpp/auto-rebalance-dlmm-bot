@@ -12,10 +12,10 @@ export interface BotConfig {
 	slippageBps: number;
 	dryRun: boolean;
 	edgeBufferBins: number;
-	jupiterQuoteBaseUrl: string;
 	swapSlippageBps: number;
 	positionWidthBins: number | null;
 	compoundFees: boolean;
+	solReserveLamports: number;
 }
 
 export class ConfigError extends Error {
@@ -70,23 +70,6 @@ function parseDryRun(raw: string | undefined): boolean {
 	return raw.trim().toLowerCase() !== "false";
 }
 
-function parseBaseUrl(
-	raw: string | undefined,
-	fallback: string,
-	name: string,
-): Effect.Effect<string, ConfigError> {
-	const value = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
-	try {
-		const u = new URL(value);
-		if (u.protocol !== "http:" && u.protocol !== "https:") {
-			return fail(`${name} must be http(s) URL, got "${value}"`);
-		}
-		return Effect.succeed(value.replace(/\/+$/, ""));
-	} catch {
-		return fail(`${name} is not a valid URL: "${value}"`);
-	}
-}
-
 function parseOptionalPositiveInt(
 	raw: string | undefined,
 	name: string,
@@ -107,6 +90,17 @@ function parseCompoundFees(
 	if (v === "true") return Effect.succeed(true);
 	if (v === "false") return Effect.succeed(false);
 	return fail(`COMPOUND_FEES must be true or false, got "${raw}"`);
+}
+
+function parseSolReserveLamports(
+	raw: string | undefined,
+): Effect.Effect<number, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed(20_000_000);
+	const sol = Number(raw);
+	if (!Number.isFinite(sol) || sol < 0) {
+		return fail(`SOL_RESERVE_SOL must be a non-negative number, got "${raw}"`);
+	}
+	return Effect.succeed(Math.round(sol * 1_000_000_000));
 }
 
 function assertPubkey(
@@ -172,11 +166,6 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			2,
 			"EDGE_BUFFER_BINS",
 		);
-		const jupiterQuoteBaseUrl = yield* parseBaseUrl(
-			env.JUPITER_QUOTE_BASE_URL,
-			"https://quote-api.jup.ag/v6",
-			"JUPITER_QUOTE_BASE_URL",
-		);
 		const swapSlippageBps = yield* parseNonNegativeInt(
 			env.SWAP_SLIPPAGE_BPS,
 			slippageBps,
@@ -187,6 +176,9 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			"POSITION_WIDTH_BINS",
 		);
 		const compoundFees = yield* parseCompoundFees(env.COMPOUND_FEES);
+		const solReserveLamports = yield* parseSolReserveLamports(
+			env.SOL_RESERVE_SOL,
+		);
 
 		return {
 			rpcUrl,
@@ -198,9 +190,9 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			slippageBps,
 			dryRun: parseDryRun(env.DRY_RUN),
 			edgeBufferBins,
-			jupiterQuoteBaseUrl,
 			swapSlippageBps,
 			positionWidthBins,
 			compoundFees,
+			solReserveLamports,
 		} satisfies BotConfig;
 	});

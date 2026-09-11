@@ -23,10 +23,12 @@ Isi `.env` dulu:
 | `SLIPPAGE_BPS` | tidak | default 100, cuma dipakai saat live |
 | `DRY_RUN` | tidak | default true |
 | `EDGE_BUFFER_BINS` | tidak | default 2 |
-| `JUPITER_QUOTE_BASE_URL` | tidak | default `https://quote-api.jup.ag/v6` |
 | `SWAP_SLIPPAGE_BPS` | tidak | default ikut `SLIPPAGE_BPS` |
 | `POSITION_WIDTH_BINS` | tidak | kosong = ikut lebar posisi lama |
 | `COMPOUND_FEES` | tidak | `true` atau `false`, default `false` |
+| `SOL_RESERVE_SOL` | tidak | SOL native yang tidak boleh disentuh, default `0.02` |
+
+Jupiter Swap V2 tanpa API key jalan keyless dengan limit rendah. Cukup untuk bot ini. Punya key berarti limit lebih longgar. Key hanya lewat shell (`export JUPITER_API_KEY=...` sebelum jalan) dan jangan pernah masuk file atau git.
 
 ## COMPOUND_FEES
 
@@ -72,7 +74,15 @@ Default `DRY_RUN=true`. Bot cuma log rencana. Tidak kirim transaksi apa pun.
 
 Mau live, isi `WALLET_PRIVATE_KEY` dan `POSITION_PUBKEY`, lalu set `DRY_RUN=false`. Kalau salah satu kosong, bot langsung berhenti dengan pesan jelas. Dia tidak nekat jalan setengah.
 
-Live path 3 tahap, satu owner, posisi yang sama dipertahankan: tarik 100% tanpa close (posisi tetap hidup walau kosong), swap kelebihan satu sisi via Jupiter, lalu rebalance in place via SDK (`simulateRebalancePositionWithBalancedStrategy` + `rebalancePosition`) dengan haircut penuh sehingga deposit murni dari topUp aktual (selisih saldo wallet sesudah swap vs snapshot sebelum tarik). Hasilnya bar seimbang di kedua sisi pool price. Fee dan slippage ikut aturan yang kamu set. Karena tidak ada close dan tidak ada posisi baru, pubkey posisi tetap valid dan rent tidak hangus.
+Live path 3 tahap, satu owner, posisi yang sama dipertahankan: tarik 100% tanpa close (posisi tetap hidup walau kosong), wrap eksplisit kaki SOL hasil withdraw ke wSOL dengan cadangan gas `SOL_RESERVE_SOL` tetap native dan tak tersentuh, swap kelebihan satu sisi via Jupiter Swap API V2 (`GET /order` bangun unsigned tx lalu sign lokal, `POST /execute` kirimkan agar co-sign jupiterz tetap sah, tanpa self-send via RPC), lalu rebalance in place via SDK (`simulateRebalancePositionWithBalancedStrategy` + `rebalancePosition`) dengan haircut penuh sehingga deposit murni dari topUp aktual (selisih saldo wallet sesudah swap vs snapshot sebelum tarik; deposit pakai `totalOutputAmount` aktual dari `/execute`, fallback ke `outAmount` order bila angka tak ada). Sizing dan topUp hanya membaca token account (ATA), tidak pernah saldo native SOL, plus cap pengaman: topUp yang melebihi saldo ATA langsung abort. Hasilnya bar seimbang di kedua sisi pool price. Fee dan slippage ikut aturan yang kamu set. Karena tidak ada close dan tidak ada posisi baru, pubkey posisi tetap valid dan rent tidak hangus. Bila gas native di bawah cadangan, rebalance abort dengan pesan suruh top up, bukan nekat jalan.
+
+## Recovery posisi kosong (withdraw sukses, swap gagal)
+
+Kalau live run berhenti di tengah — withdraw 100% terkirim tapi swap Jupiter gagal (misal endpoint quote lama mati) — dana aman di wallet dan posisi tetap hidup tapi kosong. Jangan withdraw ulang: panggil `completeRebalanceFromWallet(ctx, config, snapshot, plan, walletBefore)` yang diekspor dari `src/rebalance.ts`. Ia sizing dari delta saldo wallet saat ini, jalan order + execute Jupiter V2, lalu rebalance in place dengan haircut penuh.
+
+- `walletBefore` = snapshot sebelum withdraw yang gagal bila masih ada; bila tidak tercatat, pakai saldo dust (atau `"0"`) sehingga seluruh isi wallet dihitung sebagai hasil withdraw.
+- Tanpa `claimedFees` eksplisit, fee dibaca dari posisi yang sudah kosong (= nol), jadi fee yang sudah terlanjur claimed di wallet ikut terdeposit. Bila jumlah fee lama diketahui, teruskan sebagai argumen keenam `{ feeX, feeY }` agar `COMPOUND_FEES=false` tetap menyisihkannya.
+- Tidak ada skrip recovery bawaan dan tidak ada tx yang dikirim oleh fungsi ini tanpa kamu panggil — kamu yang eksekusi sendiri.
 
 ## Balanced rebalance
 

@@ -3,13 +3,17 @@ import { Effect } from "effect";
 import { DlmmError } from "../src/dlmm.ts";
 import {
 	addBaseUnits,
+	actualSwapOut,
 	type BalancedPlanInputs,
 	centerRange,
+	completeRebalanceFromWallet,
 	computeBalancedPlan,
 	deriveTopUp,
 	excludeFees,
 	redepositAfterHaircut,
 	resolveWidth,
+	sizeFromWalletDelta,
+	wrapAmountForReserve,
 } from "../src/rebalance.ts";
 
 const X_MINT = "So11111111111111111111111111111111111111112";
@@ -182,6 +186,107 @@ describe("excludeFees", () => {
 	});
 });
 
+describe("sizeFromWalletDelta", () => {
+	it("sizes principal-only when COMPOUND_FEES=false", () => {
+		expect(
+			sizeFromWalletDelta({
+				deltaX: "1200",
+				deltaY: "700",
+				feeX: "200",
+				feeY: "100",
+				compoundFees: false,
+			}),
+		).toEqual({ sizedX: "1000", sizedY: "600" });
+	});
+
+	it("sizes total+fee when compounding", () => {
+		expect(
+			sizeFromWalletDelta({
+				deltaX: "1200",
+				deltaY: "700",
+				feeX: "200",
+				feeY: "100",
+				compoundFees: true,
+			}),
+		).toEqual({ sizedX: "1200", sizedY: "700" });
+	});
+
+	it("floors at zero when the fee exceeds the delta", () => {
+		expect(
+			sizeFromWalletDelta({
+				deltaX: "100",
+				deltaY: "0",
+				feeX: "200",
+				feeY: "0",
+				compoundFees: false,
+			}),
+		).toEqual({ sizedX: "0", sizedY: "0" });
+	});
+});
+
+describe("actualSwapOut", () => {
+	it("prefers the actual totalOutputAmount from /execute", () => {
+		expect(actualSwapOut("985", "990")).toBe("985");
+	});
+
+	it("falls back to the order outAmount when execute omits totals", () => {
+		expect(actualSwapOut("0", "990")).toBe("990");
+		expect(actualSwapOut("", "990")).toBe("990");
+	});
+});
+
+describe("completeRebalanceFromWallet split", () => {
+	it("is exported for the standalone recovery script", () => {
+		expect(typeof completeRebalanceFromWallet).toBe("function");
+	});
+
+	it("recovery math: zero snapshot treats the full wallet as withdrawn", () => {
+		// Position [-1914,-1912] empty, funds parked in wallet after a
+		// withdraw-then-failed-swap. walletBefore zero means the whole
+		// current balance sizes the plan and the topUp.
+		const current = { x: "11814000000", y: "171000000" };
+		const delta = deriveTopUp({
+			beforeX: "0",
+			afterX: current.x,
+			beforeY: "0",
+			afterY: current.y,
+		});
+		expect(delta).toEqual({
+			topUpX: "11814000000",
+			topUpY: "171000000",
+		});
+		const { sizedX, sizedY } = sizeFromWalletDelta({
+			deltaX: delta.topUpX,
+			deltaY: delta.topUpY,
+			feeX: "0",
+			feeY: "0",
+			compoundFees: false,
+		});
+		expect(sizedX).toBe("11814000000");
+		expect(sizedY).toBe("171000000");
+	});
+
+	it("normal math: wallet delta minus snapshot equals withdrawn principal", () => {
+		// Dust cancels: before already holds it, current holds dust +
+		// principal + claimed fees, so the delta is what the old path sized.
+		const delta = deriveTopUp({
+			beforeX: "50",
+			afterX: "1250",
+			beforeY: "30",
+			afterY: "730",
+		});
+		const { sizedX, sizedY } = sizeFromWalletDelta({
+			deltaX: delta.topUpX,
+			deltaY: delta.topUpY,
+			feeX: "200",
+			feeY: "100",
+			compoundFees: false,
+		});
+		expect(sizedX).toBe("1000");
+		expect(sizedY).toBe("600");
+	});
+});
+
 describe("deriveTopUp", () => {
 	it("derives the topUp from post-swap minus pre-withdraw snapshot", () => {
 		expect(
@@ -203,5 +308,34 @@ describe("deriveTopUp", () => {
 				afterY: "0",
 			}),
 		).toEqual({ topUpX: "0", topUpY: "0" });
+	});
+});
+
+describe("wrapAmountForReserve", () => {
+	it("wraps everything above the reserve", () => {
+		expect(
+			wrapAmountForReserve({
+				nativeLamports: "171000000",
+				reserveLamports: 20000000,
+			}),
+		).toBe("151000000");
+	});
+
+	it("returns zero exactly at the reserve", () => {
+		expect(
+			wrapAmountForReserve({
+				nativeLamports: "20000000",
+				reserveLamports: 20000000,
+			}),
+		).toBe("0");
+	});
+
+	it("returns zero below the reserve, never negative", () => {
+		expect(
+			wrapAmountForReserve({
+				nativeLamports: "5290026",
+				reserveLamports: 20000000,
+			}),
+		).toBe("0");
 	});
 });

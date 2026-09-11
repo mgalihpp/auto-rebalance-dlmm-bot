@@ -3,10 +3,16 @@ import {
 	type Connection,
 	type Keypair,
 	PublicKey,
+	SystemProgram,
 	Transaction,
 	type TransactionInstruction,
-	type VersionedTransaction,
+	VersionedTransaction,
 } from "@solana/web3.js";
+import {
+	createAssociatedTokenAccountInstruction,
+	createSyncNativeInstruction,
+	getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 import BN from "bn.js";
 import { Effect } from "effect";
 import type { BotConfig } from "./config.ts";
@@ -23,8 +29,8 @@ import {
 } from "./dlmm.ts";
 import { formatDryRunBox, log, paint, txLink } from "./log.ts";
 import {
-	buildJupiterSwapTransactions,
-	getJupiterQuote,
+	executeJupiterOrder,
+	getJupiterOrder,
 	type SwapError,
 } from "./swap.ts";
 
@@ -132,6 +138,38 @@ export const deriveTopUp = (args: {
 		topUpY: diff(args.beforeY, args.afterY),
 	};
 };
+
+export interface WalletSnapshot {
+	readonly x: string;
+	readonly y: string;
+}
+
+export interface ClaimedFees {
+	readonly feeX: string;
+	readonly feeY: string;
+}
+
+// why: recovery sizes from the wallet delta (current minus pre-withdraw
+// snapshot) instead of position totals, so dust cancels and the 50/50 math
+// sees the same principal the normal path sized from. Pure and offline-testable.
+export const sizeFromWalletDelta = (args: {
+	readonly deltaX: string;
+	readonly deltaY: string;
+	readonly feeX: string;
+	readonly feeY: string;
+	readonly compoundFees: boolean;
+}): { readonly sizedX: string; readonly sizedY: string } => ({
+	sizedX: args.compoundFees ? args.deltaX : excludeFees(args.deltaX, args.feeX),
+	sizedY: args.compoundFees ? args.deltaY : excludeFees(args.deltaY, args.feeY),
+});
+
+// why: deposit accounting prefers the actual executed output, but /execute
+// may omit totals, so fall back to the order outAmount. Pure and offline-testable.
+export const actualSwapOut = (
+	totalOut: string,
+	orderOut: string,
+): string =>
+	/^\d+$/.test(totalOut) && totalOut !== "0" ? totalOut : orderOut;
 
 // why: width must survive snapshots taken while untracked, so fall back to a
 // minimal centered window instead of refusing to plan.
@@ -287,21 +325,6 @@ const sendLegacy = async (
 	return sig;
 };
 
-const sendVersioned = async (
-	connection: Connection,
-	tx: VersionedTransaction,
-	owner: Keypair,
-): Promise<string> => {
-	tx.sign([owner]);
-	const sig = await connection.sendTransaction(tx, { skipPreflight: false });
-	const res = await connection.confirmTransaction(sig, "confirmed");
-	if (res.value.err)
-		throw new Error(
-			`transaction failed: ${sig} err=${JSON.stringify(res.value.err)}`,
-		);
-	return sig;
-};
-
 const sendInstructions = async (
 	connection: Connection,
 	owner: Keypair,
@@ -314,8 +337,11 @@ const sendInstructions = async (
 const swapErrToDlmm = (e: SwapError): DlmmError =>
 	new DlmmError(`jupiter: ${e.message}`);
 
-// why: removeLiquidity unwraps wSOL to native SOL, so a SOL leg must count
-// native lamports plus any wSOL dust. SPL legs just sum parsed token accounts.
+// why: balances are ALWAYS Associated Token Account only. Native SOL is gas
+// money and must never enter sizing or topUp: removeLiquidity unwraps wSOL
+// to native, so the SOL leg is explicitly wrapped (minus reserve) into wSOL
+// before any read. Counting native directly once swept the whole gas balance
+// into a swap + deposit.
 const walletBalanceOf = async (
 	connection: Connection,
 	owner: PublicKey,
@@ -336,11 +362,98 @@ const walletBalanceOf = async (
 			total = total.add(new BN(amount));
 		}
 	}
-	if (mint.toBase58() === NATIVE_MINT) {
-		total = total.add(new BN(await connection.getBalance(owner)));
-	}
 	return total;
 };
+
+// Pure and offline-testable: how much native SOL may be wrapped to wSOL
+// after keeping the gas reserve untouched. Zero when below the reserve.
+export const wrapAmountForReserve = (args: {
+	readonly nativeLamports: string;
+	readonly reserveLamports: number;
+}): string => {
+	const native = new BN(args.nativeLamports);
+	const reserve = new BN(args.reserveLamports);
+	if (native.lte(reserve)) return "0";
+	return native.sub(reserve).toString();
+};
+
+// why: the SOL leg of a withdraw lands as native SOL, but sizing only sees
+// ATAs. Wrap the withdraw proceeds into wSOL explicitly, keeping
+// solReserveLamports native at all times. Aborts when native is below the
+// reserve instead of limping into txs that run out of gas mid-flight.
+const wrapSolLeg = (
+	connection: Connection,
+	owner: Keypair,
+	reserveLamports: number,
+): Effect.Effect<void, DlmmError> =>
+	Effect.gen(function* () {
+		const native = yield* Effect.tryPromise({
+			try: () => connection.getBalance(owner.publicKey),
+			catch: (e) =>
+				new DlmmError(
+					`native SOL read failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		if (native < reserveLamports) {
+			return yield* dlmmFail(
+				`native SOL ${(native / 1e9).toFixed(6)} below reserve ` +
+					`${(reserveLamports / 1e9).toFixed(6)}: top up gas, abort rebalance`,
+			);
+		}
+		const amount = wrapAmountForReserve({
+			nativeLamports: String(native),
+			reserveLamports,
+		});
+		if (amount === "0") {
+			yield* Effect.sync(() =>
+				log(
+					"LIVE",
+					`wrap skipped, native exactly at reserve ${(reserveLamports / 1e9).toFixed(6)} SOL`,
+				),
+			);
+			return;
+		}
+		const wsolAta = getAssociatedTokenAddressSync(
+			new PublicKey(NATIVE_MINT),
+			owner.publicKey,
+		);
+		const sig = yield* Effect.tryPromise({
+			try: async () => {
+				const ata = await connection.getAccountInfo(wsolAta);
+				const ixs: TransactionInstruction[] = [];
+				if (!ata) {
+					ixs.push(
+						createAssociatedTokenAccountInstruction(
+							owner.publicKey,
+							wsolAta,
+							owner.publicKey,
+							new PublicKey(NATIVE_MINT),
+						),
+					);
+				}
+				ixs.push(
+					SystemProgram.transfer({
+						fromPubkey: owner.publicKey,
+						toPubkey: wsolAta,
+						lamports: BigInt(amount),
+					}),
+					createSyncNativeInstruction(wsolAta),
+				);
+				return sendInstructions(connection, owner, ixs);
+			},
+			catch: (e) =>
+				new DlmmError(
+					`wrap SOL failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		yield* Effect.sync(() =>
+			log(
+				"LIVE",
+				`wrap ${(Number(amount) / 1e9).toFixed(6)} SOL -> wSOL, reserve ` +
+					`${(reserveLamports / 1e9).toFixed(6)} SOL untouched ${sig} ${txLink(sig)}`,
+			),
+		);
+	});
 
 const toNum = (v: number | BN): number =>
 	typeof v === "number" ? v : v.toNumber();
@@ -497,11 +610,18 @@ export const logDryRunBalancedPlan = (
 		);
 	});
 
-export const executeRebalance = (
+// why: recovery after a withdraw-then-failed-swap must not withdraw again.
+// The position is already empty and alive, funds sit in the wallet, so this
+// resumes from the wallet snapshot: size from the wallet delta, Jupiter V2
+// order + execute, topUp from the delta, then the same in-place rebalance.
+// The normal path calls withdraw first and delegates here, keeping one flow.
+export const completeRebalanceFromWallet = (
 	ctx: RebalanceContext,
 	config: BotConfig,
 	snapshot: PositionSnapshot,
 	plan: RebalancePlan,
+	walletBefore: WalletSnapshot,
+	claimedFees?: ClaimedFees,
 ): Effect.Effect<void, DlmmError> =>
 	Effect.gen(function* () {
 		const { connection, dlmm, owner } = ctx;
@@ -512,16 +632,20 @@ export const executeRebalance = (
 		const positionAddress = new PublicKey(config.positionPubkey);
 		const tokenXMint = dlmm.tokenX.publicKey;
 		const tokenYMint = dlmm.tokenY.publicKey;
+		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
 
-		// 1. Read position + active bin, snapshot wallet before withdraw.
-		const lbPosition = yield* Effect.tryPromise({
+		// 1. Live position (fee fallback) + active bin + current wallet.
+		// Explicit pre-withdraw fees win when the normal path provides them;
+		// a recovery re-read sees the emptied position (zero fees), so already
+		// claimed fees mixed in the wallet stay deposited unless the caller
+		// passes the known amounts.
+		const livePosition = yield* Effect.tryPromise({
 			try: () => dlmm.getPosition(positionAddress),
 			catch: (e) =>
 				new DlmmError(
 					`getPosition failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
-		const positionData = lbPosition.positionData;
 		const active = yield* Effect.tryPromise({
 			try: () => dlmm.getActiveBin(),
 			catch: (e) =>
@@ -529,25 +653,50 @@ export const executeRebalance = (
 					`getActiveBin failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
-		const walletBeforeX = yield* Effect.tryPromise({
+
+		// 1b. The SOL leg of a withdraw lands as native SOL, invisible to
+		// ATA-only reads. Wrap proceeds into wSOL now, keeping the gas
+		// reserve native; aborts when gas is below the reserve.
+		if (
+			tokenXMint.toBase58() === NATIVE_MINT ||
+			tokenYMint.toBase58() === NATIVE_MINT
+		) {
+			yield* wrapSolLeg(connection, owner, config.solReserveLamports);
+		}
+		const feeXStr =
+			claimedFees?.feeX ?? livePosition.positionData.feeX.toString();
+		const feeYStr =
+			claimedFees?.feeY ?? livePosition.positionData.feeY.toString();
+		const walletCurrentX = yield* Effect.tryPromise({
 			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
 			catch: (e) =>
 				new DlmmError(
-					`wallet X snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
+					`wallet X read failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
-		const walletBeforeY = yield* Effect.tryPromise({
+		const walletCurrentY = yield* Effect.tryPromise({
 			try: () => walletBalanceOf(connection, owner.publicKey, tokenYMint),
 			catch: (e) =>
 				new DlmmError(
-					`wallet Y snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
+					`wallet Y read failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
 
-		// 2. Size the swap on total+fee, not withdrawn-only.
-		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
-		const feeXStr = positionData.feeX.toString();
-		const feeYStr = positionData.feeY.toString();
+		// 2. Size the 50/50 plan from the wallet delta (dust cancels), same
+		// principal the normal path sized from position totals.
+		const rawDelta = deriveTopUp({
+			beforeX: walletBefore.x,
+			afterX: walletCurrentX.toString(),
+			beforeY: walletBefore.y,
+			afterY: walletCurrentY.toString(),
+		});
+		const { sizedX, sizedY } = sizeFromWalletDelta({
+			deltaX: rawDelta.topUpX,
+			deltaY: rawDelta.topUpY,
+			feeX: feeXStr,
+			feeY: feeYStr,
+			compoundFees: config.compoundFees,
+		});
 		const balancedPlan = yield* computeBalancedPlan({
 			activeBinId: snapshot.activeBinId,
 			widthBins: resolveWidth(
@@ -558,72 +707,57 @@ export const executeRebalance = (
 			strategy: plan.strategy,
 			tokenXMint: tokenXMint.toBase58(),
 			tokenYMint: tokenYMint.toBase58(),
-			withdrawnX: config.compoundFees
-				? addBaseUnits(positionData.totalXAmount, feeXStr)
-				: positionData.totalXAmount,
-			withdrawnY: config.compoundFees
-				? addBaseUnits(positionData.totalYAmount, feeYStr)
-				: positionData.totalYAmount,
+			withdrawnX: sizedX,
+			withdrawnY: sizedY,
 			activePrice: active.price,
 			slippageBps: config.swapSlippageBps,
 		});
 
-		// 3. Withdraw 100% but keep the position account alive.
-		const removeTxs = yield* Effect.tryPromise({
-			try: () =>
-				dlmm.removeLiquidity({
-					user: owner.publicKey,
-					position: positionAddress,
-					fromBinId: positionData.lowerBinId,
-					toBinId: positionData.upperBinId,
-					bps: new BN(10000),
-					shouldClaimAndClose: false,
-				}),
-			catch: (e) =>
-				new DlmmError(
-					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
-		for (const tx of removeTxs) {
-			const sig = yield* Effect.tryPromise({
-				try: () => sendLegacy(connection, owner, tx, [owner]),
-				catch: (e) =>
-					new DlmmError(
-						`removeLiquidity send failed: ${e instanceof Error ? e.message : String(e)}`,
-					),
-			});
-			yield* Effect.sync(() =>
-				log("LIVE", `withdraw 100% ${sig} ${txLink(sig)}`),
-			);
-		}
-
-		// 4. Jupiter swap as-is, then derive the actual topUp from wallet delta.
+		// 3. Jupiter Swap V2: order builds the unsigned tx, sign locally, then
+		// always POST /execute (never self-send: a winning jupiterz route needs
+		// the market-maker co-sign from /execute).
 		if (balancedPlan.swap.kind === "swap") {
-			const quoted = yield* getJupiterQuote({
-				baseUrl: config.jupiterQuoteBaseUrl,
+			const ordered = yield* getJupiterOrder({
 				inputMint: balancedPlan.swap.inputMint,
 				outputMint: balancedPlan.swap.outputMint,
 				amount: balancedPlan.swap.inAmount,
 				slippageBps: config.swapSlippageBps,
+				taker: owner.publicKey.toBase58(),
 			}).pipe(Effect.mapError(swapErrToDlmm));
-			const swapTxs = yield* buildJupiterSwapTransactions({
-				baseUrl: config.jupiterQuoteBaseUrl,
-				userPublicKey: owner.publicKey,
-				quoteResponse: quoted.rawResponse,
+			const signedTransactionB64 = yield* Effect.try({
+				try: () => {
+					const tx = VersionedTransaction.deserialize(
+						Uint8Array.from(Buffer.from(ordered.transactionB64, "base64")),
+					);
+					tx.sign([owner]);
+					return Buffer.from(tx.serialize()).toString("base64");
+				},
+				catch: (e) =>
+					new DlmmError(
+						`jupiter swap sign failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			const executed = yield* executeJupiterOrder({
+				signedTransactionB64,
+				requestId: ordered.requestId,
 			}).pipe(Effect.mapError(swapErrToDlmm));
-			for (const tx of swapTxs) {
-				const sig = yield* Effect.tryPromise({
-					try: () => sendVersioned(connection, tx, owner),
-					catch: (e) =>
-						new DlmmError(
-							`jupiter swap send failed: ${e instanceof Error ? e.message : String(e)}`,
-						),
-				});
-				yield* Effect.sync(() =>
-					log("LIVE", `jupiter swap ${sig} ${txLink(sig)}`),
-				);
-			}
+			// Deposit accounting uses the actual executed output; the wallet
+			// delta below captures it, this pins the number with order fallback.
+			const actualOut = actualSwapOut(
+				executed.totalOut,
+				ordered.order.outAmount,
+			);
+			yield* Effect.sync(() =>
+				log(
+					"LIVE",
+					`jupiter swap ${executed.signature} ${txLink(executed.signature)} ` +
+						`router=${ordered.order.router} mode=${ordered.order.mode} out=${actualOut}`,
+				),
+			);
 		}
+
+		// 4. Derive the actual topUp from the wallet delta, then rebalance the
+		// same position in place with a full haircut (deposit is topUp only).
 		const walletAfterX = yield* Effect.tryPromise({
 			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
 			catch: (e) =>
@@ -639,9 +773,9 @@ export const executeRebalance = (
 				),
 		});
 		const { topUpX: rawTopUpX, topUpY: rawTopUpY } = deriveTopUp({
-			beforeX: walletBeforeX.toString(),
+			beforeX: walletBefore.x,
 			afterX: walletAfterX.toString(),
-			beforeY: walletBeforeY.toString(),
+			beforeY: walletBefore.y,
 			afterY: walletAfterY.toString(),
 		});
 		const topUpX = config.compoundFees
@@ -650,8 +784,18 @@ export const executeRebalance = (
 		const topUpY = config.compoundFees
 			? rawTopUpY
 			: excludeFees(rawTopUpY, feeYStr);
-
-		// 5. Rebalance the same position in place: full haircut, deposit is topUp.
+		// Defensive cap: topUp is a wallet delta and can never exceed what
+		// the ATAs hold now. This guarantees native SOL (gas) is never
+		// pulled into the deposit even if a read drifts.
+		if (
+			new BN(topUpX).gt(walletAfterX) ||
+			new BN(topUpY).gt(walletAfterY)
+		) {
+			return yield* dlmmFail(
+				`topUp ${topUpX}/${topUpY} exceeds ATA balances ` +
+					`${walletAfterX.toString()}/${walletAfterY.toString()}, abort rebalance`,
+			);
+		}
 		const emptied = yield* Effect.tryPromise({
 			try: () => dlmm.getPosition(positionAddress),
 			catch: (e) =>
@@ -718,5 +862,91 @@ export const executeRebalance = (
 					`position=${positionAddress.toBase58()} ` +
 					`newRange=[${range.lowerBinId},${range.upperBinId}] strategy=${plan.strategy}`,
 			),
+		);
+	});
+
+export const executeRebalance = (
+	ctx: RebalanceContext,
+	config: BotConfig,
+	snapshot: PositionSnapshot,
+	plan: RebalancePlan,
+): Effect.Effect<void, DlmmError> =>
+	Effect.gen(function* () {
+		const { connection, dlmm, owner } = ctx;
+		if (snapshot.status === "Error")
+			return yield* dlmmFail("snapshot error, abort rebalance");
+		if (!config.positionPubkey)
+			return yield* dlmmFail("POSITION_PUBKEY missing, abort rebalance");
+		const positionAddress = new PublicKey(config.positionPubkey);
+		const tokenXMint = dlmm.tokenX.publicKey;
+		const tokenYMint = dlmm.tokenY.publicKey;
+
+		// 1. Read position for the withdraw range + pre-withdraw fees, then
+		// snapshot the wallet. Sizing moves to completeRebalanceFromWallet so a
+		// recovery can reuse it without withdrawing again.
+		const lbPosition = yield* Effect.tryPromise({
+			try: () => dlmm.getPosition(positionAddress),
+			catch: (e) =>
+				new DlmmError(
+					`getPosition failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const positionData = lbPosition.positionData;
+		const feeXStr = positionData.feeX.toString();
+		const feeYStr = positionData.feeY.toString();
+		const walletBeforeX = yield* Effect.tryPromise({
+			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
+			catch: (e) =>
+				new DlmmError(
+					`wallet X snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const walletBeforeY = yield* Effect.tryPromise({
+			try: () => walletBalanceOf(connection, owner.publicKey, tokenYMint),
+			catch: (e) =>
+				new DlmmError(
+					`wallet Y snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+
+		// 2. Withdraw 100% but keep the position account alive.
+		const removeTxs = yield* Effect.tryPromise({
+			try: () =>
+				dlmm.removeLiquidity({
+					user: owner.publicKey,
+					position: positionAddress,
+					fromBinId: positionData.lowerBinId,
+					toBinId: positionData.upperBinId,
+					bps: new BN(10000),
+					shouldClaimAndClose: false,
+				}),
+			catch: (e) =>
+				new DlmmError(
+					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		for (const tx of removeTxs) {
+			const sig = yield* Effect.tryPromise({
+				try: () => sendLegacy(connection, owner, tx, [owner]),
+				catch: (e) =>
+					new DlmmError(
+						`removeLiquidity send failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			yield* Effect.sync(() =>
+				log("LIVE", `withdraw 100% ${sig} ${txLink(sig)}`),
+			);
+		}
+
+		// 3. Resume from the wallet: sizing, Jupiter V2 swap, topUp, in-place
+		// rebalance. Same code a standalone recovery script calls, so the
+		// normal path and the recovery path cannot drift apart.
+		yield* completeRebalanceFromWallet(
+			ctx,
+			config,
+			snapshot,
+			plan,
+			{ x: walletBeforeX.toString(), y: walletBeforeY.toString() },
+			{ feeX: feeXStr, feeY: feeYStr },
 		);
 	});

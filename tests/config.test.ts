@@ -69,3 +69,32 @@ describe("COMPOUND_FEES", () => {
 		});
 	});
 });
+
+describe("SOL_RESERVE_SOL", () => {
+	afterEach(() => {
+		delete process.env.SOL_RESERVE_SOL;
+	});
+
+	it("defaults to 0.02 SOL", async () => {
+		await withEnv({ ...baseEnv, SOL_RESERVE_SOL: undefined }, async () => {
+			delete process.env.SOL_RESERVE_SOL;
+			const c = await runConfig();
+			expect(c.solReserveLamports).toBe(20_000_000);
+		});
+	});
+
+	it("parses decimal SOL to lamports", async () => {
+		await withEnv({ ...baseEnv, SOL_RESERVE_SOL: "0.05" }, async () => {
+			const c = await runConfig();
+			expect(c.solReserveLamports).toBe(50_000_000);
+		});
+	});
+
+	it("rejects garbage with a typed ConfigError", async () => {
+		await withEnv({ ...baseEnv, SOL_RESERVE_SOL: "banyak" }, async () => {
+			const err = await Effect.runPromise(Effect.flip(loadConfig()));
+			expect(err).toBeInstanceOf(ConfigError);
+			expect(err.message).toContain("SOL_RESERVE_SOL");
+		});
+	});
+});

@@ -7,7 +7,6 @@ import {
 	type BalancedPlanInputs,
 	capTopUpToBalances,
 	centerRange,
-	completeRebalanceFromWallet,
 	computeBalancedPlan,
 	deriveTopUp,
 	excludeFees,

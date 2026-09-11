@@ -8,8 +8,8 @@ import { Effect } from "effect";
 import {
 	parseJupiterExecuteResponse,
 	parseJupiterOrderResponse,
-	signJupiterOrder,
 	SwapError,
+	signJupiterOrder,
 } from "../src/swap.ts";
 
 const X_MINT = "So11111111111111111111111111111111111111112";
@@ -208,15 +208,17 @@ describe("signJupiterOrder", () => {
 			recentBlockhash: "11111111111111111111111111111111",
 			instructions: [],
 		}).compileToV0Message();
-		const b64 = Buffer.from(new VersionedTransaction(message).serialize()).toString(
-			"base64",
-		);
+		const b64 = Buffer.from(
+			new VersionedTransaction(message).serialize(),
+		).toString("base64");
 		return { b64, owner };
 	};
 
 	it("signs locally and returns a signed base64 without broadcasting", async () => {
 		const { b64, owner } = unsignedB64();
-		const signed = await Effect.runPromise(signJupiterOrder({ transactionB64: b64, owner }));
+		const signed = await Effect.runPromise(
+			signJupiterOrder({ transactionB64: b64, owner }),
+		);
 		expect(typeof signed).toBe("string");
 		expect(signed).not.toBe(b64);
 		const tx = VersionedTransaction.deserialize(

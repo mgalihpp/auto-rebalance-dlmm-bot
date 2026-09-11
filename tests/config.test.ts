@@ -67,6 +67,117 @@ describe("COMPOUND_FEES", () => {
 	});
 });
 
+describe("JITO_ENABLED", () => {
+	afterEach(() => {
+		delete process.env.JITO_ENABLED;
+	});
+
+	it("defaults to false when empty", async () => {
+		await withEnv({ ...baseEnv, JITO_ENABLED: undefined }, async () => {
+			delete process.env.JITO_ENABLED;
+			const c = await runConfig();
+			expect(c.jitoEnabled).toBe(false);
+		});
+	});
+
+	it("parses true", async () => {
+		await withEnv({ ...baseEnv, JITO_ENABLED: "true" }, async () => {
+			const c = await runConfig();
+			expect(c.jitoEnabled).toBe(true);
+		});
+	});
+
+	it("rejects garbage with a typed ConfigError", async () => {
+		await withEnv({ ...baseEnv, JITO_ENABLED: "yes" }, async () => {
+			const err = await Effect.runPromise(Effect.flip(loadConfig()));
+			expect(err).toBeInstanceOf(ConfigError);
+			expect(err.message).toContain("JITO_ENABLED");
+		});
+	});
+});
+
+describe("JITO_TIP_SOL", () => {
+	afterEach(() => {
+		delete process.env.JITO_TIP_SOL;
+	});
+
+	it("defaults to 0.0005 SOL", async () => {
+		await withEnv({ ...baseEnv, JITO_TIP_SOL: undefined }, async () => {
+			delete process.env.JITO_TIP_SOL;
+			const c = await runConfig();
+			expect(c.jitoTipLamports).toBe(500_000);
+		});
+	});
+
+	it("parses decimal SOL to lamports", async () => {
+		await withEnv({ ...baseEnv, JITO_TIP_SOL: "0.001" }, async () => {
+			const c = await runConfig();
+			expect(c.jitoTipLamports).toBe(1_000_000);
+		});
+	});
+
+	it("rejects dust below the 1000-lamport minimum", async () => {
+		await withEnv({ ...baseEnv, JITO_TIP_SOL: "0.0000005" }, async () => {
+			const err = await Effect.runPromise(Effect.flip(loadConfig()));
+			expect(err).toBeInstanceOf(ConfigError);
+			expect(err.message).toContain("JITO_TIP_SOL");
+		});
+	});
+
+	it("rejects garbage with a typed ConfigError", async () => {
+		await withEnv({ ...baseEnv, JITO_TIP_SOL: "banyak" }, async () => {
+			const err = await Effect.runPromise(Effect.flip(loadConfig()));
+			expect(err).toBeInstanceOf(ConfigError);
+			expect(err.message).toContain("JITO_TIP_SOL");
+		});
+	});
+});
+
+describe("JITO_BLOCK_ENGINE_URL", () => {
+	afterEach(() => {
+		delete process.env.JITO_BLOCK_ENGINE_URL;
+	});
+
+	it("defaults to mainnet", async () => {
+		await withEnv(
+			{ ...baseEnv, JITO_BLOCK_ENGINE_URL: undefined },
+			async () => {
+				delete process.env.JITO_BLOCK_ENGINE_URL;
+				const c = await runConfig();
+				expect(c.jitoBlockEngineUrl).toBe(
+					"https://mainnet.block-engine.jito.wtf",
+				);
+			},
+		);
+	});
+
+	it("accepts a regional endpoint", async () => {
+		await withEnv(
+			{
+				...baseEnv,
+				JITO_BLOCK_ENGINE_URL: "https://tokyo.mainnet.block-engine.jito.wtf",
+			},
+			async () => {
+				const c = await runConfig();
+				expect(c.jitoBlockEngineUrl).toBe(
+					"https://tokyo.mainnet.block-engine.jito.wtf",
+				);
+			},
+		);
+	});
+
+	it("rejects non-URL garbage", async () => {
+		await withEnv(
+			{ ...baseEnv, JITO_BLOCK_ENGINE_URL: "not-a-url" },
+			async () => {
+				const err = await Effect.runPromise(Effect.flip(loadConfig()));
+				expect(err).toBeInstanceOf(ConfigError);
+				expect(err.message).toContain("JITO_BLOCK_ENGINE_URL");
+			},
+		);
+	});
+});
+
 describe("SOL_RESERVE_SOL", () => {
 	afterEach(() => {
 		delete process.env.SOL_RESERVE_SOL;

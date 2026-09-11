@@ -1,6 +1,10 @@
 import { PublicKey } from "@solana/web3.js";
 import { Effect } from "effect";
 import type { LiquidityStrategy } from "./decision.ts";
+import {
+	JITO_DEFAULT_BLOCK_ENGINE_URL,
+	JITO_MIN_TIP_LAMPORTS,
+} from "./jito.ts";
 
 export interface BotConfig {
 	rpcUrl: string;
@@ -16,6 +20,9 @@ export interface BotConfig {
 	positionWidthBins: number | null;
 	compoundFees: boolean;
 	solReserveLamports: number;
+	jitoEnabled: boolean;
+	jitoTipLamports: number;
+	jitoBlockEngineUrl: string;
 }
 
 export class ConfigError extends Error {
@@ -101,6 +108,50 @@ function parseSolReserveLamports(
 	return Effect.succeed(Math.round(sol * 1_000_000_000));
 }
 
+function parseJitoEnabled(
+	raw: string | undefined,
+): Effect.Effect<boolean, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed(false);
+	const v = raw.trim().toLowerCase();
+	if (v === "true") return Effect.succeed(true);
+	if (v === "false") return Effect.succeed(false);
+	return fail(`JITO_ENABLED must be true or false, got "${raw}"`);
+}
+
+function parseJitoTipLamports(
+	raw: string | undefined,
+): Effect.Effect<number, ConfigError> {
+	if (raw === undefined || raw.trim() === "") return Effect.succeed(500_000);
+	const sol = Number(raw);
+	if (!Number.isFinite(sol) || sol < 0) {
+		return fail(`JITO_TIP_SOL must be a non-negative number, got "${raw}"`);
+	}
+	const lamports = Math.round(sol * 1_000_000_000);
+	if (lamports < JITO_MIN_TIP_LAMPORTS) {
+		return fail(
+			`JITO_TIP_SOL must be at least ${JITO_MIN_TIP_LAMPORTS} lamports, got "${raw}"`,
+		);
+	}
+	return Effect.succeed(lamports);
+}
+
+function parseJitoBlockEngineUrl(
+	raw: string | undefined,
+): Effect.Effect<string, ConfigError> {
+	if (raw === undefined || raw.trim() === "")
+		return Effect.succeed(JITO_DEFAULT_BLOCK_ENGINE_URL);
+	const url = raw.trim();
+	try {
+		const u = new URL(url);
+		if (u.protocol !== "http:" && u.protocol !== "https:") {
+			return fail(`JITO_BLOCK_ENGINE_URL must be http(s) URL, got "${url}"`);
+		}
+	} catch {
+		return fail(`JITO_BLOCK_ENGINE_URL is not a valid URL: "${url}"`);
+	}
+	return Effect.succeed(url);
+}
+
 function assertPubkey(
 	raw: string,
 	name: string,
@@ -177,6 +228,11 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 		const solReserveLamports = yield* parseSolReserveLamports(
 			env.SOL_RESERVE_SOL,
 		);
+		const jitoEnabled = yield* parseJitoEnabled(env.JITO_ENABLED);
+		const jitoTipLamports = yield* parseJitoTipLamports(env.JITO_TIP_SOL);
+		const jitoBlockEngineUrl = yield* parseJitoBlockEngineUrl(
+			env.JITO_BLOCK_ENGINE_URL,
+		);
 
 		return {
 			rpcUrl,
@@ -192,5 +248,8 @@ export const loadConfig = (): Effect.Effect<BotConfig, ConfigError> =>
 			positionWidthBins,
 			compoundFees,
 			solReserveLamports,
+			jitoEnabled,
+			jitoTipLamports,
+			jitoBlockEngineUrl,
 		} satisfies BotConfig;
 	});

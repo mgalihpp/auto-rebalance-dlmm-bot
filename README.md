@@ -27,7 +27,7 @@ Status yang dilacak:
    - Output swap yang berupa SOL mendarat sebagai native, jadi di-wrap ulang ke wSOL sebelum deposit.
    - Deposit lagi ke posisi yang sama, terpusat di active bin.
    - Fee hasil claim masuk ke wallet, tidak ikut di-deposit ulang (kecuali `COMPOUND_FEES=true`).
-   - SOL untuk gas selalu disisakan sebesar `SOL_RESERVE_SOL`, tidak ikut dipakai.
+   - Native SOL tidak pernah turun di bawah saldo sebelum withdraw (atau `SOL_RESERVE_SOL`, mana yang lebih besar). Cuma hasil withdraw/swap di atasnya yang di-wrap dan ikut deposit. Isi wallet yang sudah ada sebelumnya tidak tersentuh.
 
 Bot tidak pernah pakai saldo native SOL untuk sizing/deposit. Semua perhitungan pakai token account. Kalau gas kurang dari reserve, proses dibatalkan.
 
@@ -99,7 +99,7 @@ Lanjutkan manual dari kode dengan:
 completeRebalanceFromWallet(ctx, config, snapshot, plan, walletBefore)
 ```
 
-`walletBefore` adalah snapshot wallet sebelum withdraw, atau `"0"` kalau tidak tercatat.
+`walletBefore` adalah snapshot wallet sebelum withdraw `{ x, y, sol }` (`sol` = native sebelum withdraw, atau native saat ini kalau tidak tercatat — artinya native yang sudah ada tidak ikut di-wrap). Untuk `x`/`y` boleh `"0"` kalau tidak tercatat.
 
 ## Struktur project
 

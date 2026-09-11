@@ -14,7 +14,7 @@ import {
 	redepositAfterHaircut,
 	resolveWidth,
 	sizeFromWalletDelta,
-	wrapAmountForReserve,
+	wrapAmountAboveFloor,
 } from "../src/rebalance.ts";
 
 const X_MINT = "So11111111111111111111111111111111111111112";
@@ -304,30 +304,30 @@ describe("deriveTopUp", () => {
 	});
 });
 
-describe("wrapAmountForReserve", () => {
-	it("wraps everything above the reserve", () => {
+describe("wrapAmountAboveFloor", () => {
+	it("wraps only what sits above the pre-withdraw floor", () => {
 		expect(
-			wrapAmountForReserve({
-				nativeLamports: "171000000",
-				reserveLamports: 20000000,
+			wrapAmountAboveFloor({
+				nativeLamports: "241000000",
+				floorLamports: "130794000",
 			}),
-		).toBe("151000000");
+		).toBe("110206000");
 	});
 
-	it("returns zero exactly at the reserve", () => {
+	it("returns zero exactly at the floor", () => {
 		expect(
-			wrapAmountForReserve({
-				nativeLamports: "20000000",
-				reserveLamports: 20000000,
+			wrapAmountAboveFloor({
+				nativeLamports: "130794000",
+				floorLamports: "130794000",
 			}),
 		).toBe("0");
 	});
 
-	it("returns zero below the reserve, never negative", () => {
+	it("returns zero below the floor, never negative", () => {
 		expect(
-			wrapAmountForReserve({
+			wrapAmountAboveFloor({
 				nativeLamports: "5290026",
-				reserveLamports: 20000000,
+				floorLamports: "130794000",
 			}),
 		).toBe("0");
 	});

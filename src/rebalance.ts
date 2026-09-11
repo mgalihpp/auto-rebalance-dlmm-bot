@@ -140,6 +140,7 @@ export const deriveTopUp = (args: {
 export interface WalletSnapshot {
 	readonly x: string;
 	readonly y: string;
+	readonly sol: string;
 }
 
 export const capTopUpToBalances = (args: {
@@ -376,21 +377,25 @@ const walletBalanceOf = async (
 	return total;
 };
 
-// Wrap amount keeps the gas reserve native; zero at or below reserve.
-export const wrapAmountForReserve = (args: {
+// Wrap amount only takes what sits above the floor; the floor itself is
+// never touched. The floor is the pre-withdraw native balance (or the gas
+// reserve when higher), so a rebalance only ever uses position proceeds.
+export const wrapAmountAboveFloor = (args: {
 	readonly nativeLamports: string;
-	readonly reserveLamports: number;
+	readonly floorLamports: string;
 }): string => {
-	const native = new BN(args.nativeLamports);
-	const reserve = new BN(args.reserveLamports);
-	if (native.lte(reserve)) return "0";
-	return native.sub(reserve).toString();
+	const over = new BN(args.nativeLamports).sub(new BN(args.floorLamports));
+	return over.lte(new BN(0)) ? "0" : over.toString();
 };
 
-// Wrap withdraw proceeds to wSOL, keeping the reserve native; aborts below it.
+const TX_FEE_BUFFER_LAMPORTS = 1_000_000;
+
+// Wrap the withdraw/swap proceeds above the floor to wSOL. Pre-existing
+// native SOL (savings, gas) stays native; aborts when gas can't cover txs.
 const wrapSolLeg = (
 	connection: Connection,
 	owner: Keypair,
+	floorLamports: number,
 	reserveLamports: number,
 ): Effect.Effect<void, DlmmError> =>
 	Effect.gen(function* () {
@@ -407,15 +412,16 @@ const wrapSolLeg = (
 					`${(reserveLamports / 1e9).toFixed(6)}: top up gas, abort rebalance`,
 			);
 		}
-		const amount = wrapAmountForReserve({
+		const amount = wrapAmountAboveFloor({
 			nativeLamports: String(native),
-			reserveLamports,
+			floorLamports: String(floorLamports + TX_FEE_BUFFER_LAMPORTS),
 		});
 		if (amount === "0") {
 			yield* Effect.sync(() =>
 				log(
 					"LIVE",
-					`wrap skipped, native exactly at reserve ${(reserveLamports / 1e9).toFixed(6)} SOL`,
+					`wrap skipped, native ${(native / 1e9).toFixed(6)} at floor, ` +
+						`proceeds none`,
 				),
 			);
 			return;
@@ -456,8 +462,8 @@ const wrapSolLeg = (
 		yield* Effect.sync(() =>
 			log(
 				"LIVE",
-				`wrap ${(Number(amount) / 1e9).toFixed(6)} SOL -> wSOL, reserve ` +
-					`${(reserveLamports / 1e9).toFixed(6)} SOL untouched ${sig} ${txLink(sig)}`,
+				`wrap ${(Number(amount) / 1e9).toFixed(6)} SOL -> wSOL, floor ` +
+					`${(floorLamports / 1e9).toFixed(6)} SOL untouched ${sig} ${txLink(sig)}`,
 			),
 		);
 	});
@@ -641,6 +647,13 @@ export const completeRebalanceFromWallet = (
 		const tokenXMint = dlmm.tokenX.publicKey;
 		const tokenYMint = dlmm.tokenY.publicKey;
 		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
+		// Native floor: the higher of the gas reserve and the pre-withdraw
+		// balance. Only withdraw/swap proceeds above it may be wrapped, so
+		// pre-existing wallet SOL is never absorbed into the deposit.
+		const floorLamports = Math.max(
+			config.solReserveLamports,
+			Number(mustBaseUnit(walletBefore.sol, "walletBeforeSol").toString()),
+		);
 
 		// Explicit pre-withdraw fees win when the normal path provides them;
 		// a recovery re-read sees the emptied position (zero fees), so already
@@ -665,7 +678,12 @@ export const completeRebalanceFromWallet = (
 			tokenXMint.toBase58() === NATIVE_MINT ||
 			tokenYMint.toBase58() === NATIVE_MINT
 		) {
-			yield* wrapSolLeg(connection, owner, config.solReserveLamports);
+			yield* wrapSolLeg(
+				connection,
+				owner,
+				floorLamports,
+				config.solReserveLamports,
+			);
 		}
 		const feeXStr =
 			claimedFees?.feeX ?? livePosition.positionData.feeX.toString();
@@ -763,7 +781,12 @@ export const completeRebalanceFromWallet = (
 			tokenXMint.toBase58() === NATIVE_MINT ||
 			tokenYMint.toBase58() === NATIVE_MINT
 		) {
-			yield* wrapSolLeg(connection, owner, config.solReserveLamports);
+			yield* wrapSolLeg(
+				connection,
+				owner,
+				floorLamports,
+				config.solReserveLamports,
+			);
 		}
 		const walletAfterX = yield* Effect.tryPromise({
 			try: () => walletBalanceOf(connection, owner.publicKey, tokenXMint),
@@ -915,6 +938,15 @@ export const executeRebalance = (
 					`wallet Y snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
+		// Native baseline: anything at or below this after the run stays
+		// native. Only withdraw/swap proceeds above it may enter the deposit.
+		const walletBeforeSol = yield* Effect.tryPromise({
+			try: () => connection.getBalance(owner.publicKey),
+			catch: (e) =>
+				new DlmmError(
+					`wallet SOL snapshot failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
 
 		// 2. Withdraw 100% but keep the position account alive.
 		const removeTxs = yield* Effect.tryPromise({
@@ -952,7 +984,11 @@ export const executeRebalance = (
 			config,
 			snapshot,
 			plan,
-			{ x: walletBeforeX.toString(), y: walletBeforeY.toString() },
+			{
+				x: walletBeforeX.toString(),
+				y: walletBeforeY.toString(),
+				sol: String(walletBeforeSol),
+			},
 			{ feeX: feeXStr, feeY: feeYStr },
 		);
 	});

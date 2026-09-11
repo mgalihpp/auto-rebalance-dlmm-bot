@@ -30,7 +30,6 @@ import {
 import type { BundleLeg, BundleStatus, JitoError } from "./jito.ts";
 import {
 	assertBundlePlan,
-	formatBundlePlan,
 	getTipAccounts,
 	pickTipAccount,
 	pollBundleStatus,
@@ -910,7 +909,7 @@ export const logDryRunBundlePlan = (
 ): Effect.Effect<void> =>
 	Effect.sync(() => {
 		const legs = [
-			"withdraw",
+			"withdraw (sequential first, so Jupiter sees wallet funds)",
 			...(sketch.involvesSol ? ["wrap?"] : []),
 			...(sketch.swap.kind === "swap" ? ["swap(signed)"] : []),
 			"deposit+tip-last",
@@ -929,15 +928,12 @@ export const logDryRunBundlePlan = (
 		);
 	});
 
-type LbPosition = Awaited<ReturnType<RebalanceContext["dlmm"]["getPosition"]>>;
-
-export interface JitoBundleAttempt {
+export interface PostWithdrawBundleArgs {
 	readonly ctx: RebalanceContext;
 	readonly config: BotConfig;
 	readonly snapshot: PositionSnapshot;
 	readonly plan: RebalancePlan;
 	readonly walletBefore: WalletSnapshot;
-	readonly lbPosition: LbPosition;
 	readonly feeXStr: string;
 	readonly feeYStr: string;
 }
@@ -968,15 +964,52 @@ const signLegacyB64 = (
 			),
 	});
 
-// why: the bundle is sized from pre-withdraw position totals plus the
-// quoted swap out, never from wallet reads. A quote that misses slippage
-// fails the whole bundle atomically, so the sequential path stays untouched
-// as the fallback.
-export const attemptJitoBundle = (
-	args: JitoBundleAttempt,
+const withdrawAll = (args: {
+	readonly ctx: RebalanceContext;
+	readonly positionAddress: PublicKey;
+	readonly lowerBinId: number;
+	readonly upperBinId: number;
+}): Effect.Effect<void, DlmmError> =>
+	Effect.gen(function* () {
+		const { connection, dlmm, owner } = args.ctx;
+		const removeTxs = yield* Effect.tryPromise({
+			try: () =>
+				dlmm.removeLiquidity({
+					user: owner.publicKey,
+					position: args.positionAddress,
+					fromBinId: args.lowerBinId,
+					toBinId: args.upperBinId,
+					bps: new BN(10000),
+					shouldClaimAndClose: false,
+				}),
+			catch: (e) =>
+				new DlmmError(
+					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		for (const tx of removeTxs) {
+			const sig = yield* Effect.tryPromise({
+				try: () => sendLegacy(connection, owner, tx, [owner]),
+				catch: (e) =>
+					new DlmmError(
+						`removeLiquidity send failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			yield* Effect.sync(() =>
+				log("LIVE", `withdraw 100% ${sig} ${txLink(sig)}`),
+			);
+		}
+	});
+
+// why: Jupiter validates the taker's input balance when building the swap,
+// so the withdraw must land BEFORE the bundle is planned. The bundle then
+// covers wrap/swap/deposit+tip atomically; a miss falls back to the
+// sequential tail with the withdraw already done.
+export const attemptPostWithdrawBundle = (
+	args: PostWithdrawBundleArgs,
 ): Effect.Effect<boolean, DlmmError> =>
 	Effect.gen(function* () {
-		const { ctx, config, snapshot, plan, walletBefore, lbPosition } = args;
+		const { ctx, config, snapshot, plan, walletBefore } = args;
 		const { connection, dlmm, owner } = ctx;
 		if (!config.positionPubkey)
 			return yield* dlmmFail("POSITION_PUBKEY missing, abort rebalance");
@@ -984,36 +1017,7 @@ export const attemptJitoBundle = (
 		const tokenXMint = dlmm.tokenX.publicKey;
 		const tokenYMint = dlmm.tokenY.publicKey;
 		const sdkStrategy: StrategyType = sdkStrategyOf(plan.strategy);
-		const positionData = lbPosition.positionData;
-
-		const sizedX = config.compoundFees
-			? addBaseUnits(positionData.totalXAmount, args.feeXStr)
-			: positionData.totalXAmount;
-		const sizedY = config.compoundFees
-			? addBaseUnits(positionData.totalYAmount, args.feeYStr)
-			: positionData.totalYAmount;
-		const active = yield* Effect.tryPromise({
-			try: () => dlmm.getActiveBin(),
-			catch: (e) =>
-				new DlmmError(
-					`getActiveBin failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
-		const balancedPlan = yield* computeBalancedPlan({
-			activeBinId: snapshot.activeBinId,
-			widthBins: resolveWidth(
-				snapshot.lowerBinId,
-				snapshot.upperBinId,
-				config.positionWidthBins,
-			),
-			strategy: plan.strategy,
-			tokenXMint: tokenXMint.toBase58(),
-			tokenYMint: tokenYMint.toBase58(),
-			withdrawnX: sizedX,
-			withdrawnY: sizedY,
-			activePrice: active.price,
-			slippageBps: config.swapSlippageBps,
-		});
+		const solIsX = tokenXMint.toBase58() === NATIVE_MINT;
 
 		const beforeSol = mustBaseUnit(
 			walletBefore.sol,
@@ -1045,6 +1049,106 @@ export const attemptJitoBundle = (
 				})
 			: "0";
 
+		// Live sizes from the post-withdraw wallet delta (plus the
+		// not-yet-wrapped SOL leg) so Jupiter sees the input funds. Dry-run
+		// sketches from pre-withdraw position totals since nothing landed.
+		let sizedX: string;
+		let sizedY: string;
+		if (config.dryRun) {
+			const prePosition = yield* Effect.tryPromise({
+				try: () => dlmm.getPosition(positionAddress),
+				catch: (e) =>
+					new DlmmError(
+						`getPosition failed: ${e instanceof Error ? e.message : String(e)}`,
+					),
+			});
+			const preData = prePosition.positionData;
+			sizedX = config.compoundFees
+				? addBaseUnits(`${preData.totalXAmount}`, args.feeXStr)
+				: `${preData.totalXAmount}`;
+			sizedY = config.compoundFees
+				? addBaseUnits(`${preData.totalYAmount}`, args.feeYStr)
+				: `${preData.totalYAmount}`;
+		} else {
+			const walletCurrentX = yield* readWalletLeg(
+				connection,
+				owner.publicKey,
+				tokenXMint,
+				"X",
+				"read",
+			);
+			const walletCurrentY = yield* readWalletLeg(
+				connection,
+				owner.publicKey,
+				tokenYMint,
+				"Y",
+				"read",
+			);
+			const rawDelta = deriveTopUp({
+				beforeX: walletBefore.x,
+				afterX: walletCurrentX.toString(),
+				beforeY: walletBefore.y,
+				afterY: walletCurrentY.toString(),
+			});
+			const sized = sizeFromWalletDelta({
+				deltaX: rawDelta.topUpX,
+				deltaY: rawDelta.topUpY,
+				feeX: args.feeXStr,
+				feeY: args.feeYStr,
+				compoundFees: config.compoundFees,
+			});
+			sizedX = sized.sizedX;
+			sizedY = sized.sizedY;
+			if (wrapAmount !== "0") {
+				if (solIsX) sizedX = addBaseUnits(sizedX, wrapAmount);
+				else sizedY = addBaseUnits(sizedY, wrapAmount);
+			}
+		}
+		const active = yield* Effect.tryPromise({
+			try: () => dlmm.getActiveBin(),
+			catch: (e) =>
+				new DlmmError(
+					`getActiveBin failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
+		const balancedPlan = yield* computeBalancedPlan({
+			activeBinId: snapshot.activeBinId,
+			widthBins: resolveWidth(
+				snapshot.lowerBinId,
+				snapshot.upperBinId,
+				config.positionWidthBins,
+			),
+			strategy: plan.strategy,
+			tokenXMint: tokenXMint.toBase58(),
+			tokenYMint: tokenYMint.toBase58(),
+			withdrawnX: sizedX,
+			withdrawnY: sizedY,
+			activePrice: active.price,
+			slippageBps: config.swapSlippageBps,
+		});
+
+		if (config.dryRun) {
+			const legs = [
+				"withdraw (sequential first)",
+				...(wrapAmount !== "0" ? ["wrap?"] : []),
+				...(balancedPlan.swap.kind === "swap"
+					? [
+							`swap(signed) in=${balancedPlan.swap.inAmount} minOut=${balancedPlan.swap.outAmountMin} (quote needs landed withdraw, skipped)`,
+						]
+					: []),
+				"deposit+tip-last",
+			];
+			yield* Effect.sync(() =>
+				console.log(
+					paint(
+						"DRY_RUN",
+						`jito bundle plan (nothing sent):\n${legs.map((leg, i) => `  [${i}] ${leg}`).join("\n")}`,
+					),
+				),
+			);
+			return true;
+		}
+
 		const { blockhash } = yield* Effect.tryPromise({
 			try: () => connection.getLatestBlockhash("confirmed"),
 			catch: (e) =>
@@ -1052,29 +1156,6 @@ export const attemptJitoBundle = (
 					`getLatestBlockhash failed: ${e instanceof Error ? e.message : String(e)}`,
 				),
 		});
-		const removeTxs = yield* Effect.tryPromise({
-			try: () =>
-				dlmm.removeLiquidity({
-					user: owner.publicKey,
-					position: positionAddress,
-					fromBinId: positionData.lowerBinId,
-					toBinId: positionData.upperBinId,
-					bps: new BN(10000),
-					shouldClaimAndClose: false,
-				}),
-			catch: (e) =>
-				new DlmmError(
-					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
-		});
-		const withdrawLegs: BundleLeg[] = [];
-		for (const [i, tx] of removeTxs.entries()) {
-			const txB64 = yield* signLegacyB64(tx, owner, blockhash);
-			withdrawLegs.push({
-				label: removeTxs.length > 1 ? `withdraw-${i}` : "withdraw",
-				txB64,
-			});
-		}
 		const preLegs: BundleLeg[] = [];
 		if (wrapAmount !== "0") {
 			const wsolAta = getAssociatedTokenAddressSync(
@@ -1157,11 +1238,18 @@ export const attemptJitoBundle = (
 			);
 		}
 
+		const emptied = yield* Effect.tryPromise({
+			try: () => dlmm.getPosition(positionAddress),
+			catch: (e) =>
+				new DlmmError(
+					`getPosition (emptied) failed: ${e instanceof Error ? e.message : String(e)}`,
+				),
+		});
 		const response = yield* Effect.tryPromise({
 			try: () =>
 				dlmm.simulateRebalancePositionWithBalancedStrategy(
 					positionAddress,
-					positionData,
+					emptied.positionData,
 					sdkStrategy,
 					new BN(depositX),
 					new BN(depositY),
@@ -1214,7 +1302,6 @@ export const attemptJitoBundle = (
 			}),
 		);
 		const bundleLegs: readonly BundleLeg[] = [
-			...withdrawLegs,
 			...preLegs,
 			...swapLegs,
 			...midLegs,
@@ -1233,22 +1320,11 @@ export const attemptJitoBundle = (
 			catch: asDlmm,
 		});
 
-		if (config.dryRun) {
-			yield* Effect.sync(() =>
-				console.log(
-					paint("DRY_RUN", `${formatBundlePlan(bundlePlan)}\n  (nothing sent)`),
-				),
-			);
-			return true;
-		}
-
-		let state: BundleStatus = { _tag: "Built" };
 		const txB64s = bundlePlan.legs.map((l) => l.txB64);
 		yield* simulateJitoBundle({
 			blockEngineUrl: config.jitoBlockEngineUrl,
 			transactions: txB64s,
 		}).pipe(Effect.mapError(jitoToDlmm));
-		state = { _tag: "SimulatedOk" };
 		yield* Effect.sync(() =>
 			log("LIVE", `jito bundle simulated ok (${txB64s.length} txs)`),
 		);
@@ -1256,7 +1332,6 @@ export const attemptJitoBundle = (
 			blockEngineUrl: config.jitoBlockEngineUrl,
 			transactions: txB64s,
 		}).pipe(Effect.mapError(jitoToDlmm));
-		state = { _tag: "Sent", bundleId };
 		yield* Effect.sync(() => log("LIVE", `jito bundle sent ${bundleId}`));
 		const final: BundleStatus = yield* pollBundleStatus({
 			blockEngineUrl: config.jitoBlockEngineUrl,
@@ -1266,16 +1341,15 @@ export const attemptJitoBundle = (
 				dlmmFail(`jito poll failed (${e.message}), fallback to sequential`),
 			),
 		);
-		state = final;
-		if (state._tag === "Landed") {
+		if (final._tag === "Landed") {
 			yield* Effect.sync(() =>
-				log("LIVE", `jito bundle landed ${bundleId} slot=${state.slot ?? "?"}`),
+				log("LIVE", `jito bundle landed ${bundleId} slot=${final.slot ?? "?"}`),
 			);
 			return true;
 		}
-		if (state._tag === "Failed") {
+		if (final._tag === "Failed") {
 			return yield* dlmmFail(
-				`jito bundle ${bundleId} failed (${state.reason}), fallback to sequential`,
+				`jito bundle ${bundleId} failed (${final.reason}), fallback to sequential`,
 			);
 		}
 		return yield* dlmmFail(
@@ -1333,10 +1407,19 @@ export const executeRebalance = (
 				),
 		});
 
-		// Atomic path first when opted in; any bundle failure falls back to
-		// the sequential flow below, unchanged.
+		// Phase-split Jito path: the withdraw lands first so Jupiter sees
+		// wallet funds, then wrap/swap/deposit+tip go as one bundle. Any
+		// bundle failure falls back to the sequential tail (withdraw done).
 		if (config.jitoEnabled) {
-			const landed = yield* attemptJitoBundle({
+			if (!config.dryRun) {
+				yield* withdrawAll({
+					ctx,
+					positionAddress,
+					lowerBinId: positionData.lowerBinId,
+					upperBinId: positionData.upperBinId,
+				});
+			}
+			const landed = yield* attemptPostWithdrawBundle({
 				ctx,
 				config,
 				snapshot,
@@ -1346,7 +1429,6 @@ export const executeRebalance = (
 					y: walletBeforeY.toString(),
 					sol: String(walletBeforeSol),
 				},
-				lbPosition,
 				feeXStr,
 				feeYStr,
 			}).pipe(
@@ -1361,36 +1443,29 @@ export const executeRebalance = (
 				),
 			);
 			if (landed) return;
+			if (config.dryRun) return;
+			yield* completeRebalanceFromWallet(
+				ctx,
+				config,
+				snapshot,
+				plan,
+				{
+					x: walletBeforeX.toString(),
+					y: walletBeforeY.toString(),
+					sol: String(walletBeforeSol),
+				},
+				{ feeX: feeXStr, feeY: feeYStr },
+			);
+			return;
 		}
 
 		// 2. Withdraw 100% but keep the position account alive.
-		const removeTxs = yield* Effect.tryPromise({
-			try: () =>
-				dlmm.removeLiquidity({
-					user: owner.publicKey,
-					position: positionAddress,
-					fromBinId: positionData.lowerBinId,
-					toBinId: positionData.upperBinId,
-					bps: new BN(10000),
-					shouldClaimAndClose: false,
-				}),
-			catch: (e) =>
-				new DlmmError(
-					`removeLiquidity failed: ${e instanceof Error ? e.message : String(e)}`,
-				),
+		yield* withdrawAll({
+			ctx,
+			positionAddress,
+			lowerBinId: positionData.lowerBinId,
+			upperBinId: positionData.upperBinId,
 		});
-		for (const tx of removeTxs) {
-			const sig = yield* Effect.tryPromise({
-				try: () => sendLegacy(connection, owner, tx, [owner]),
-				catch: (e) =>
-					new DlmmError(
-						`removeLiquidity send failed: ${e instanceof Error ? e.message : String(e)}`,
-					),
-			});
-			yield* Effect.sync(() =>
-				log("LIVE", `withdraw 100% ${sig} ${txLink(sig)}`),
-			);
-		}
 
 		// One flow shared with recovery scripts.
 		yield* completeRebalanceFromWallet(

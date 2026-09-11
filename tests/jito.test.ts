@@ -214,9 +214,9 @@ describe("bundlesEndpoint", () => {
 		);
 	});
 	it("tolerates trailing slashes and keeps a full path", () => {
-		expect(bundlesEndpoint("https://tokyo.mainnet.block-engine.jito.wtf/")).toBe(
-			"https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
-		);
+		expect(
+			bundlesEndpoint("https://tokyo.mainnet.block-engine.jito.wtf/"),
+		).toBe("https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles");
 		expect(
 			bundlesEndpoint("https://mainnet.block-engine.jito.wtf/api/v1/bundles"),
 		).toBe("https://mainnet.block-engine.jito.wtf/api/v1/bundles");

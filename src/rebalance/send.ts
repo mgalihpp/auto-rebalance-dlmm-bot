@@ -21,6 +21,7 @@ export const DEFAULT_RESEND_MS = 5000;
 
 export interface SendManualInput {
 	tx: Transaction;
+	label?: string;
 	pollMs?: number;
 	resendMs?: number;
 }
@@ -36,6 +37,13 @@ function toSendError(error: unknown): SendError {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Local HH:MM:SS stamp so stage logs form a realtime timeline.
+export function nowStamp(): string {
+	const d = new Date();
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export function computeUnitLimitWithBuffer(unitsConsumed: number): number {
@@ -131,7 +139,7 @@ async function fetchPriorityFeeEstimate(
 		return parsePriorityFeeEstimate(payload);
 	} catch {
 		console.warn(
-			"getPriorityFeeEstimate failed (non-Helius RPC?) — continuing with 0 priority fee.",
+			`[${nowStamp()}] getPriorityFeeEstimate failed (non-Helius RPC?) — continuing with 0 priority fee.`,
 		);
 		return 0;
 	}
@@ -145,6 +153,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 		const signer = yield* AppSigner;
 		return yield* Effect.tryPromise({
 			try: async () => {
+				const label = input.label ?? "tx";
 				const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
 				const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
 				const payer = signer.publicKey;
@@ -178,6 +187,9 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 					});
 				}
 				const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
+				console.log(
+					`[${nowStamp()}][${label}] simulate: used=${unitsConsumed} limit=${cuLimit} ixs=${base.length}`,
+				);
 
 				const probeBase58 = bs58.encode(simTx.serialize());
 				const microLamports = await fetchPriorityFeeEstimate(
@@ -203,19 +215,20 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 					const status = statuses?.value?.[0];
 					if (status?.err) {
 						throw new SendError({
-							message: `transaction failed: ${JSON.stringify(status.err)}`,
+							message: `[${label}] transaction failed: ${JSON.stringify(status.err)} (sim used=${unitsConsumed} limit=${cuLimit})`,
 						});
 					}
 					if (
 						status?.confirmationStatus === "confirmed" ||
 						status?.confirmationStatus === "finalized"
 					) {
+						console.log(`[${nowStamp()}][${label}] confirmed: ${signature}`);
 						return signature;
 					}
 					const currentHeight = await connection.getBlockHeight();
 					if (currentHeight > lastValidBlockHeight) {
 						throw new SendError({
-							message: "blockhash expired, transaction failed",
+							message: `[${label}] blockhash expired, transaction failed`,
 						});
 					}
 					if (Date.now() - lastSend >= resendMs) {

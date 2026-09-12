@@ -9,6 +9,7 @@ import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadPositionState } from "../src/rebalance/dlmm.ts";
 import { originalHalfRange } from "../src/rebalance/plan.ts";
+import { nowStamp } from "../src/rebalance/send.ts";
 import {
 	describeZapSwap,
 	executeZapRebalance,
@@ -17,14 +18,17 @@ import {
 import { AppConfig, makeAppLive } from "../src/services.ts";
 
 if (!process.argv.includes("--live")) {
-	console.error("REFUSING: this script sends REAL transactions.");
-	console.error("Usage: bun run scripts/test-rebalance.ts --live");
+	console.error(
+		`[${nowStamp()}] REFUSING: this script sends REAL transactions.`,
+	);
+	console.error(
+		`[${nowStamp()}] Usage: bun run scripts/test-rebalance.ts --live`,
+	);
 	process.exit(2);
 }
 
-console.log("=== LIVE REBALANCE TRIGGER (zap) ===");
-console.log("Real transactions in 5s. Ctrl+C to abort.");
-await new Promise((resolve) => setTimeout(resolve, 5000));
+console.log(`[${nowStamp()}] === LIVE REBALANCE TRIGGER (zap) ===`);
+console.log(`[${nowStamp()}] Real transactions in 5s. Ctrl+C to abort.`);
 
 loadDotenv();
 
@@ -37,7 +41,7 @@ const main = Effect.gen(function* () {
 	const snapshot = state.snapshot;
 	const halfWidth = originalHalfRange(snapshot.lowerBinId, snapshot.upperBinId);
 	console.log(
-		`Rebalancing ${snapshot.position} (active ${snapshot.activeBinId}, ` +
+		`[${nowStamp()}] Rebalancing ${snapshot.position} (active ${snapshot.activeBinId}, ` +
 			`range ${snapshot.lowerBinId}-${snapshot.upperBinId}) -> ` +
 			`${botConfig.strategy} delta -${halfWidth}..+${halfWidth}`,
 	);
@@ -52,18 +56,18 @@ const main = Effect.gen(function* () {
 	});
 	const result = plan.estimate.result;
 	console.log(
-		`Swap: ${describeZapSwap(plan.estimate)} -> ` +
+		`[${nowStamp()}] Swap: ${describeZapSwap(plan.estimate)} -> ` +
 			`X=${result.postSwapX.toString()} Y=${result.postSwapY.toString()}`,
 	);
 
 	const done = yield* executeZapRebalance({ plan });
-	console.log(`Rebalanced via zap: ${done.signature}`);
+	console.log(`[${nowStamp()}] Rebalanced via zap: ${done.signature}`);
 });
 
 Effect.runPromise(Effect.provide(main, makeAppLive(process.env))).then(
 	() => process.exit(0),
 	(error) => {
-		console.error("Live rebalance failed:", error);
+		console.error(`[${nowStamp()}] Live rebalance failed:`, error);
 		process.exit(1);
 	},
 );

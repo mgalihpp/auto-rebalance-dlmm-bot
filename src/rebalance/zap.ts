@@ -20,7 +20,7 @@ import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
 import { toStrategyType } from "./dlmm.ts";
 import type { StrategyKind } from "./plan.ts";
-import { sendManualTransaction } from "./send.ts";
+import { nowStamp, sendManualTransaction } from "./send.ts";
 
 export class ZapError extends Data.TaggedError("ZapError")<{
 	message: string;
@@ -106,8 +106,9 @@ export const planZapRebalance = Effect.fn("planZapRebalance")(function* (
 // Token-2022 mints resolve to the right program.
 function sendZapTx(
 	tx: Transaction,
+	label: string,
 ): Effect.Effect<string, ZapError, SolanaConnection | AppSigner> {
-	return Effect.mapError(sendManualTransaction({ tx }), (error) =>
+	return Effect.mapError(sendManualTransaction({ tx, label }), (error) =>
 		toZapError(error),
 	);
 }
@@ -148,9 +149,12 @@ function ensureUserTokenAccounts(
 		if (instructions.length === 0) {
 			return;
 		}
-		const signature = yield* sendZapTx(new Transaction().add(...instructions));
+		const signature = yield* sendZapTx(
+			new Transaction().add(...instructions),
+			"create-atas",
+		);
 		console.log(
-			`Created ${instructions.length} missing token account(s): ${signature}`,
+			`[${nowStamp()}] Created ${instructions.length} missing token account(s): ${signature}`,
 		);
 	});
 }
@@ -177,26 +181,26 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		catch: toZapError,
 	});
 	console.log(
-		`Zap estimate: current X=${response.estimation.currentBalances.tokenX.toString()} ` +
+		`[${nowStamp()}] Zap estimate: current X=${response.estimation.currentBalances.tokenX.toString()} ` +
 			`Y=${response.estimation.currentBalances.tokenY.toString()} -> ` +
 			`after swap X=${response.estimation.afterSwap.tokenX.toString()} ` +
 			`Y=${response.estimation.afterSwap.tokenY.toString()}`,
 	);
-	const txs = [
-		response.setupTransaction,
-		response.initBinArrayTransaction,
-		response.rebalancePositionTransaction,
-		response.swapTransaction,
-		response.ledgerTransaction,
-		response.zapInTransaction,
-		response.cleanUpTransaction,
+	const txs: Array<readonly [string, Transaction | null | undefined]> = [
+		["setup", response.setupTransaction],
+		["init-bin-array", response.initBinArrayTransaction],
+		["rebalance-position", response.rebalancePositionTransaction],
+		["swap", response.swapTransaction],
+		["ledger", response.ledgerTransaction],
+		["zap-in", response.zapInTransaction],
+		["clean-up", response.cleanUpTransaction],
 	];
 	let last = "";
-	for (const tx of txs) {
+	for (const [label, tx] of txs) {
 		if (!tx) {
 			continue;
 		}
-		last = yield* sendZapTx(tx);
+		last = yield* sendZapTx(tx, label);
 	}
 	return { signature: last };
 });

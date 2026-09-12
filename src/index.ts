@@ -4,6 +4,7 @@ import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
+import { nowStamp } from "./rebalance/send.ts";
 import {
 	describeZapSwap,
 	executeZapRebalance,
@@ -29,29 +30,31 @@ function printPreview(
 	},
 ) {
 	const result = plan.estimate.result;
-	console.log("=== DLMM auto-rebalance preview (zap) ===");
-	console.log(`Pool:            ${snapshot.pool}`);
-	console.log(`Position:        ${snapshot.position}`);
-	console.log(`Active bin:      ${snapshot.activeBinId}`);
+	console.log(`[${nowStamp()}] === DLMM auto-rebalance preview (zap) ===`);
+	console.log(`[${nowStamp()}] Pool:            ${snapshot.pool}`);
+	console.log(`[${nowStamp()}] Position:        ${snapshot.position}`);
+	console.log(`[${nowStamp()}] Active bin:      ${snapshot.activeBinId}`);
 	console.log(
-		`Current range:   ${snapshot.lowerBinId} - ${snapshot.upperBinId}`,
+		`[${nowStamp()}] Current range:   ${snapshot.lowerBinId} - ${snapshot.upperBinId}`,
 	);
 	console.log(
-		`New range:       active ${snapshot.activeBinId} ` +
+		`[${nowStamp()}] New range:       active ${snapshot.activeBinId} ` +
 			`delta ${plan.minDeltaId}..${plan.maxDeltaId}`,
 	);
 	console.log(
-		`Rebalanced:      X=${formatBn(result.postSwapX)} Y=${formatBn(result.postSwapY)}`,
+		`[${nowStamp()}] Rebalanced:      X=${formatBn(result.postSwapX)} Y=${formatBn(result.postSwapY)}`,
 	);
-	console.log(`Swaps required:  ${describeZapSwap(plan.estimate)}`);
-	console.log(`Slippage:        ${plan.slippageBps} bps`);
+	console.log(
+		`[${nowStamp()}] Swaps required:  ${describeZapSwap(plan.estimate)}`,
+	);
+	console.log(`[${nowStamp()}] Slippage:        ${plan.slippageBps} bps`);
 }
 
 let stopped = false;
 let wake: (() => void) | undefined;
 
 function requestShutdown() {
-	console.log("Shutting down...");
+	console.log(`[${nowStamp()}] Shutting down...`);
 	stopped = true;
 	wake?.();
 }
@@ -70,7 +73,7 @@ const pollIntervalMs = await Effect.runPromise(
 		appLive,
 	),
 ).catch((error): never => {
-	console.error("Rebalance failed:", error);
+	console.error(`[${nowStamp()}] Rebalance failed:`, error);
 	process.exit(1);
 });
 
@@ -90,7 +93,7 @@ function runIteration() {
 			)
 		) {
 			console.log(
-				`Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
+				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
 			);
 			return;
 		}
@@ -116,12 +119,12 @@ function runIteration() {
 		});
 
 		if (config.dryRun) {
-			console.log("Dry run — no transactions sent.");
+			console.log(`[${nowStamp()}] Dry run — no transactions sent.`);
 			return;
 		}
 
 		const done = yield* executeZapRebalance({ plan });
-		console.log(`Rebalanced via zap: ${done.signature}`);
+		console.log(`[${nowStamp()}] Rebalanced via zap: ${done.signature}`);
 	});
 }
 
@@ -129,7 +132,7 @@ while (!stopped) {
 	try {
 		await Effect.runPromise(Effect.provide(runIteration(), appLive));
 	} catch (error) {
-		console.error("Rebalance failed:", error);
+		console.error(`[${nowStamp()}] Rebalance failed:`, error);
 	}
 	if (stopped) {
 		break;

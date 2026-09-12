@@ -1,12 +1,11 @@
 import {
 	ComputeBudgetProgram,
-	type Connection,
-	type Keypair,
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
+import { AppSigner, SolanaConnection } from "../services.ts";
 
 export class SendError extends Data.TaggedError("SendError")<{
 	message: string;
@@ -21,9 +20,7 @@ export const DEFAULT_POLL_MS = 2000;
 export const DEFAULT_RESEND_MS = 5000;
 
 export interface SendManualInput {
-	connection: Connection;
 	tx: Transaction;
-	signers: Keypair[];
 	pollMs?: number;
 	resendMs?: number;
 }
@@ -140,104 +137,101 @@ async function fetchPriorityFeeEstimate(
 	}
 }
 
-export function sendManualTransaction(
-	input: SendManualInput,
-): Effect.Effect<string, SendError> {
-	return Effect.tryPromise({
-		try: async () => {
-			const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
-			const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
-			const firstSigner = input.signers[0];
-			if (!firstSigner) {
-				throw new SendError({ message: "no signers provided" });
-			}
-			const payer = firstSigner.publicKey;
-			const base = stripComputeBudgetInstructions(input.tx.instructions);
-			if (base.length === 0) {
-				throw new SendError({ message: "transaction has no instructions" });
-			}
+export const sendManualTransaction = Effect.fn("sendManualTransaction")(
+	function* (
+		input: SendManualInput,
+	): Effect.fn.Return<string, SendError, SolanaConnection | AppSigner> {
+		const connection = yield* SolanaConnection;
+		const signer = yield* AppSigner;
+		return yield* Effect.tryPromise({
+			try: async () => {
+				const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
+				const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
+				const payer = signer.publicKey;
+				const base = stripComputeBudgetInstructions(input.tx.instructions);
+				if (base.length === 0) {
+					throw new SendError({ message: "transaction has no instructions" });
+				}
 
-			const simBlockhash = (
-				await input.connection.getLatestBlockhash("confirmed")
-			).blockhash;
-			const simTx = new Transaction().add(
-				ComputeBudgetProgram.setComputeUnitLimit({
-					units: SIMULATION_CU_LIMIT,
-				}),
-				...base,
-			);
-			simTx.feePayer = payer;
-			simTx.recentBlockhash = simBlockhash;
-			simTx.sign(...input.signers);
+				const simBlockhash = (await connection.getLatestBlockhash("confirmed"))
+					.blockhash;
+				const simTx = new Transaction().add(
+					ComputeBudgetProgram.setComputeUnitLimit({
+						units: SIMULATION_CU_LIMIT,
+					}),
+					...base,
+				);
+				simTx.feePayer = payer;
+				simTx.recentBlockhash = simBlockhash;
+				simTx.sign(signer);
 
-			const simulation = await input.connection.simulateTransaction(simTx);
-			if (simulation.value.err) {
-				throw new SendError({
-					message: `simulation failed: ${JSON.stringify(simulation.value.err)}`,
-				});
-			}
-			const unitsConsumed = simulation.value.unitsConsumed;
-			if (unitsConsumed === undefined || unitsConsumed === null) {
-				throw new SendError({
-					message: "simulation failed to return unitsConsumed",
-				});
-			}
-			const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
-
-			const probeBase58 = bs58.encode(simTx.serialize());
-			const microLamports = await fetchPriorityFeeEstimate(
-				input.connection.rpcEndpoint,
-				probeBase58,
-			);
-			const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
-
-			const { blockhash, lastValidBlockHeight } =
-				await input.connection.getLatestBlockhash("confirmed");
-			const finalTx = new Transaction().add(...budget, ...base);
-			finalTx.feePayer = payer;
-			finalTx.recentBlockhash = blockhash;
-			finalTx.sign(...input.signers);
-			const raw = finalTx.serialize();
-			const signature = await input.connection.sendRawTransaction(raw, {
-				skipPreflight: true,
-			});
-
-			let lastSend = Date.now();
-			for (;;) {
-				const statuses = await input.connection.getSignatureStatuses([
-					signature,
-				]);
-				const status = statuses?.value?.[0];
-				if (status?.err) {
+				const simulation = await connection.simulateTransaction(simTx);
+				if (simulation.value.err) {
 					throw new SendError({
-						message: `transaction failed: ${JSON.stringify(status.err)}`,
+						message: `simulation failed: ${JSON.stringify(simulation.value.err)}`,
 					});
 				}
-				if (
-					status?.confirmationStatus === "confirmed" ||
-					status?.confirmationStatus === "finalized"
-				) {
-					return signature;
-				}
-				const currentHeight = await input.connection.getBlockHeight();
-				if (currentHeight > lastValidBlockHeight) {
+				const unitsConsumed = simulation.value.unitsConsumed;
+				if (unitsConsumed === undefined || unitsConsumed === null) {
 					throw new SendError({
-						message: "blockhash expired, transaction failed",
+						message: "simulation failed to return unitsConsumed",
 					});
 				}
-				if (Date.now() - lastSend >= resendMs) {
-					try {
-						await input.connection.sendRawTransaction(raw, {
-							skipPreflight: true,
+				const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
+
+				const probeBase58 = bs58.encode(simTx.serialize());
+				const microLamports = await fetchPriorityFeeEstimate(
+					connection.rpcEndpoint,
+					probeBase58,
+				);
+				const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
+
+				const { blockhash, lastValidBlockHeight } =
+					await connection.getLatestBlockhash("confirmed");
+				const finalTx = new Transaction().add(...budget, ...base);
+				finalTx.feePayer = payer;
+				finalTx.recentBlockhash = blockhash;
+				finalTx.sign(signer);
+				const raw = finalTx.serialize();
+				const signature = await connection.sendRawTransaction(raw, {
+					skipPreflight: true,
+				});
+
+				let lastSend = Date.now();
+				for (;;) {
+					const statuses = await connection.getSignatureStatuses([signature]);
+					const status = statuses?.value?.[0];
+					if (status?.err) {
+						throw new SendError({
+							message: `transaction failed: ${JSON.stringify(status.err)}`,
 						});
-					} catch {
-						// Rebroadcast is best-effort; keep polling until expiry.
 					}
-					lastSend = Date.now();
+					if (
+						status?.confirmationStatus === "confirmed" ||
+						status?.confirmationStatus === "finalized"
+					) {
+						return signature;
+					}
+					const currentHeight = await connection.getBlockHeight();
+					if (currentHeight > lastValidBlockHeight) {
+						throw new SendError({
+							message: "blockhash expired, transaction failed",
+						});
+					}
+					if (Date.now() - lastSend >= resendMs) {
+						try {
+							await connection.sendRawTransaction(raw, {
+								skipPreflight: true,
+							});
+						} catch {
+							// Rebroadcast is best-effort; keep polling until expiry.
+						}
+						lastSend = Date.now();
+					}
+					await sleep(pollMs);
 				}
-				await sleep(pollMs);
-			}
-		},
-		catch: toSendError,
-	});
-}
+			},
+			catch: toSendError,
+		});
+	},
+);

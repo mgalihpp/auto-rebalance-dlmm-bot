@@ -1,9 +1,7 @@
-import { Connection, Keypair } from "@solana/web3.js";
 import type BN from "bn.js";
 import Decimal from "decimal.js";
 import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
-import { loadConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
@@ -12,6 +10,7 @@ import {
 	planZapRebalance,
 	type ZapPlan,
 } from "./rebalance/zap.ts";
+import { AppConfig, makeAppLive } from "./services.ts";
 
 loadDotenv();
 
@@ -60,21 +59,26 @@ function requestShutdown() {
 process.on("SIGINT", requestShutdown);
 process.on("SIGTERM", requestShutdown);
 
-const botConfig = await Effect.runPromise(loadConfig(process.env)).catch(
-	(error): never => {
-		console.error("Rebalance failed:", error);
-		process.exit(1);
-	},
-);
-const connection = new Connection(botConfig.rpcUrl, "confirmed");
-const signer = Keypair.fromSecretKey(botConfig.secretKey);
+const appLive = makeAppLive(process.env);
+
+const pollIntervalMs = await Effect.runPromise(
+	Effect.provide(
+		Effect.gen(function* () {
+			const config = yield* AppConfig;
+			return config.pollIntervalMs;
+		}),
+		appLive,
+	),
+).catch((error): never => {
+	console.error("Rebalance failed:", error);
+	process.exit(1);
+});
 
 function runIteration() {
 	return Effect.gen(function* () {
+		const config = yield* AppConfig;
 		const state = yield* loadPositionState({
-			connection,
-			poolAddress: botConfig.poolAddress,
-			owner: signer.publicKey,
+			poolAddress: config.poolAddress,
 		});
 		const snapshot = state.snapshot;
 
@@ -96,13 +100,12 @@ function runIteration() {
 			snapshot.upperBinId,
 		);
 		const plan = yield* planZapRebalance({
-			connection,
-			poolAddress: botConfig.poolAddress,
+			poolAddress: config.poolAddress,
 			positionAddress: snapshot.position,
-			strategy: botConfig.strategy,
-			slippageBps: botConfig.slippageBps,
+			strategy: config.strategy,
+			slippageBps: config.slippageBps,
 			halfWidth,
-			jupiterApiKey: botConfig.jupiterApiKey,
+			jupiterApiKey: config.jupiterApiKey,
 		});
 		printPreview(plan, {
 			pool: snapshot.pool,
@@ -112,23 +115,19 @@ function runIteration() {
 			upperBinId: snapshot.upperBinId,
 		});
 
-		if (botConfig.dryRun) {
+		if (config.dryRun) {
 			console.log("Dry run — no transactions sent.");
 			return;
 		}
 
-		const done = yield* executeZapRebalance({
-			connection,
-			signer,
-			plan,
-		});
+		const done = yield* executeZapRebalance({ plan });
 		console.log(`Rebalanced via zap: ${done.signature}`);
 	});
 }
 
 while (!stopped) {
 	try {
-		await Effect.runPromise(runIteration());
+		await Effect.runPromise(Effect.provide(runIteration(), appLive));
 	} catch (error) {
 		console.error("Rebalance failed:", error);
 	}
@@ -137,7 +136,7 @@ while (!stopped) {
 	}
 	await new Promise<void>((resolve) => {
 		wake = resolve;
-		setTimeout(resolve, botConfig.pollIntervalMs);
+		setTimeout(resolve, pollIntervalMs);
 	});
 	wake = undefined;
 }

@@ -1,5 +1,6 @@
 import {
 	ComputeBudgetProgram,
+	type SignatureStatus,
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
@@ -16,14 +17,36 @@ export const MAX_CU_LIMIT = 1_400_000;
 export const CU_BUFFER_MULTIPLIER = 1.1;
 export const COMPUTE_BUDGET_PROGRAM_ID =
 	"ComputeBudget111111111111111111111111111111";
-export const DEFAULT_POLL_MS = 2000;
-export const DEFAULT_RESEND_MS = 5000;
+// Helius getPriorityFeeEstimate levels, Min -> UnsafeMax, plus Auto: let
+// Helius pick its own recommended optimal fee (`{ recommended: true }`)
+// instead of pinning a percentile. High (75th percentile) lands rebalance
+// legs in seconds while still costing fractions of a cent.
+export const PRIORITY_LEVELS = [
+	"Min",
+	"Low",
+	"Medium",
+	"High",
+	"VeryHigh",
+	"UnsafeMax",
+] as const;
+export type PriorityLevel = (typeof PRIORITY_LEVELS)[number];
+export const AUTO_PRIORITY_LEVEL = "Auto" as const;
+export type PrioritySetting = PriorityLevel | typeof AUTO_PRIORITY_LEVEL;
+export const PRIORITY_SETTINGS: readonly PrioritySetting[] = [
+	...PRIORITY_LEVELS,
+	AUTO_PRIORITY_LEVEL,
+];
+export const DEFAULT_PRIORITY_LEVEL: PrioritySetting = "High";
+export const DEFAULT_POLL_MS = 1000;
+export const DEFAULT_RESEND_MS = 2500;
+export const MAX_SEND_ATTEMPTS = 3;
 
 export interface SendManualInput {
 	tx: Transaction;
 	label?: string;
 	pollMs?: number;
 	resendMs?: number;
+	priorityLevel?: PrioritySetting;
 }
 
 function toSendError(error: unknown): SendError {
@@ -115,10 +138,32 @@ export function withComputeBudget(
 	return rebuilt;
 }
 
+// Pulls `{ error: { message } }` out of a fee-estimate payload for the
+// no-estimate warning. Anything else means a non-Helius RPC.
+function feeErrorReason(payload: unknown): string {
+	if (typeof payload === "object" && payload !== null && "error" in payload) {
+		const error = payload.error;
+		if (typeof error === "object" && error !== null && "message" in error) {
+			const message = error.message;
+			if (typeof message === "string" && message !== "") {
+				return `: ${message}`;
+			}
+		}
+	}
+	return " (non-Helius RPC?)";
+}
+
 async function fetchPriorityFeeEstimate(
 	rpcEndpoint: string,
 	serializedTxBase58: string,
+	priorityLevel: PrioritySetting,
 ): Promise<number> {
+	// `recommended` cannot be combined with `priorityLevel` (the API rejects
+	// it), so Auto sends `{ recommended: true }` on its own.
+	const options =
+		priorityLevel === AUTO_PRIORITY_LEVEL
+			? { recommended: true }
+			: { priorityLevel };
 	try {
 		const response = await fetch(rpcEndpoint, {
 			method: "POST",
@@ -130,13 +175,21 @@ async function fetchPriorityFeeEstimate(
 				params: [
 					{
 						transaction: serializedTxBase58,
-						options: { recommended: true },
+						options,
 					},
 				],
 			}),
 		});
 		const payload: unknown = await response.json();
-		return parsePriorityFeeEstimate(payload);
+		const estimate = parsePriorityFeeEstimate(payload);
+		if (estimate === 0) {
+			// Helius answers API misuse with a 200 + { error } payload, which
+			// parses to 0. Never go quiet-fee: surface the reason in the log.
+			console.warn(
+				`[${nowStamp()}] getPriorityFeeEstimate returned no estimate${feeErrorReason(payload)} — continuing with 0 priority fee.`,
+			);
+		}
+		return estimate;
 	} catch {
 		console.warn(
 			`[${nowStamp()}] getPriorityFeeEstimate failed (non-Helius RPC?) — continuing with 0 priority fee.`,
@@ -144,6 +197,11 @@ async function fetchPriorityFeeEstimate(
 		return 0;
 	}
 }
+
+// Retryable send failure: rebuild with a fresh blockhash and re-sign (Helius:
+// only ever re-sign with a new blockhash). Simulation and on-chain failures
+// throw SendError and abort without retry.
+class RetryableSendError extends Error {}
 
 export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 	function* (
@@ -156,93 +214,165 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 				const label = input.label ?? "tx";
 				const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
 				const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
+				const priorityLevel = input.priorityLevel ?? DEFAULT_PRIORITY_LEVEL;
 				const payer = signer.publicKey;
 				const base = stripComputeBudgetInstructions(input.tx.instructions);
 				if (base.length === 0) {
 					throw new SendError({ message: "transaction has no instructions" });
 				}
 
-				const simBlockhash = (await connection.getLatestBlockhash("confirmed"))
-					.blockhash;
-				const simTx = new Transaction().add(
-					ComputeBudgetProgram.setComputeUnitLimit({
-						units: SIMULATION_CU_LIMIT,
-					}),
-					...base,
-				);
-				simTx.feePayer = payer;
-				simTx.recentBlockhash = simBlockhash;
-				simTx.sign(signer);
+				let lastSignature: string | undefined;
+				const sendOnce = async (attempt: number): Promise<string> => {
+					const simBlockhash = (
+						await connection.getLatestBlockhash("confirmed")
+					).blockhash;
+					const simTx = new Transaction().add(
+						ComputeBudgetProgram.setComputeUnitLimit({
+							units: SIMULATION_CU_LIMIT,
+						}),
+						...base,
+					);
+					simTx.feePayer = payer;
+					simTx.recentBlockhash = simBlockhash;
+					simTx.sign(signer);
 
-				const simulation = await connection.simulateTransaction(simTx);
-				if (simulation.value.err) {
-					throw new SendError({
-						message: `simulation failed: ${JSON.stringify(simulation.value.err)}`,
-					});
-				}
-				const unitsConsumed = simulation.value.unitsConsumed;
-				if (unitsConsumed === undefined || unitsConsumed === null) {
-					throw new SendError({
-						message: "simulation failed to return unitsConsumed",
-					});
-				}
-				const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
-				console.log(
-					`[${nowStamp()}][${label}] simulate: used=${unitsConsumed} limit=${cuLimit} ixs=${base.length}`,
-				);
-
-				const probeBase58 = bs58.encode(simTx.serialize());
-				const microLamports = await fetchPriorityFeeEstimate(
-					connection.rpcEndpoint,
-					probeBase58,
-				);
-				const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
-
-				const { blockhash, lastValidBlockHeight } =
-					await connection.getLatestBlockhash("confirmed");
-				const finalTx = new Transaction().add(...budget, ...base);
-				finalTx.feePayer = payer;
-				finalTx.recentBlockhash = blockhash;
-				finalTx.sign(signer);
-				const raw = finalTx.serialize();
-				const signature = await connection.sendRawTransaction(raw, {
-					skipPreflight: true,
-				});
-
-				let lastSend = Date.now();
-				for (;;) {
-					const statuses = await connection.getSignatureStatuses([signature]);
-					const status = statuses?.value?.[0];
-					if (status?.err) {
+					const simulation = await connection.simulateTransaction(simTx);
+					if (simulation.value.err) {
 						throw new SendError({
-							message: `[${label}] transaction failed: ${JSON.stringify(status.err)} (sim used=${unitsConsumed} limit=${cuLimit})`,
+							message: `simulation failed: ${JSON.stringify(simulation.value.err)}`,
 						});
 					}
-					if (
-						status?.confirmationStatus === "confirmed" ||
-						status?.confirmationStatus === "finalized"
-					) {
-						console.log(`[${nowStamp()}][${label}] confirmed: ${signature}`);
-						return signature;
-					}
-					const currentHeight = await connection.getBlockHeight();
-					if (currentHeight > lastValidBlockHeight) {
+					const unitsConsumed = simulation.value.unitsConsumed;
+					if (unitsConsumed === undefined || unitsConsumed === null) {
 						throw new SendError({
-							message: `[${label}] blockhash expired, transaction failed`,
+							message: "simulation failed to return unitsConsumed",
 						});
 					}
-					if (Date.now() - lastSend >= resendMs) {
+					const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
+					const probeBase58 = bs58.encode(simTx.serialize());
+					const microLamports = await fetchPriorityFeeEstimate(
+						connection.rpcEndpoint,
+						probeBase58,
+						priorityLevel,
+					);
+					console.log(
+						`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: used=${unitsConsumed} limit=${cuLimit} fee=${microLamports}uL(${priorityLevel}) ixs=${base.length}`,
+					);
+					const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
+
+					const { blockhash, lastValidBlockHeight } =
+						await connection.getLatestBlockhash("confirmed");
+					const finalTx = new Transaction().add(...budget, ...base);
+					finalTx.feePayer = payer;
+					finalTx.recentBlockhash = blockhash;
+					finalTx.sign(signer);
+					const raw = finalTx.serialize();
+					let signature: string;
+					try {
+						signature = await connection.sendRawTransaction(raw, {
+							skipPreflight: true,
+						});
+					} catch (error) {
+						throw new RetryableSendError(
+							`[${label}] send failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					lastSignature = signature;
+
+					let lastSend = Date.now();
+					for (;;) {
+						let status: SignatureStatus | null | undefined;
 						try {
-							await connection.sendRawTransaction(raw, {
-								skipPreflight: true,
-							});
-						} catch {
-							// Rebroadcast is best-effort; keep polling until expiry.
+							const statuses = await connection.getSignatureStatuses([
+								signature,
+							]);
+							status = statuses?.value?.[0];
+						} catch (error) {
+							throw new RetryableSendError(
+								`[${label}] status check failed: ${error instanceof Error ? error.message : String(error)}`,
+							);
 						}
-						lastSend = Date.now();
+						if (status?.err) {
+							throw new SendError({
+								message: `[${label}] transaction failed: ${JSON.stringify(status.err)} (sim used=${unitsConsumed} limit=${cuLimit})`,
+							});
+						}
+						if (
+							status?.confirmationStatus === "confirmed" ||
+							status?.confirmationStatus === "finalized"
+						) {
+							console.log(`[${nowStamp()}][${label}] confirmed: ${signature}`);
+							return signature;
+						}
+						let currentHeight: number;
+						try {
+							currentHeight = await connection.getBlockHeight();
+						} catch (error) {
+							throw new RetryableSendError(
+								`[${label}] block height check failed: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						if (currentHeight > lastValidBlockHeight) {
+							throw new RetryableSendError(`[${label}] blockhash expired`);
+						}
+						if (Date.now() - lastSend >= resendMs) {
+							try {
+								await connection.sendRawTransaction(raw, {
+									skipPreflight: true,
+								});
+							} catch {
+								// Rebroadcast is best-effort; keep polling until expiry.
+							}
+							lastSend = Date.now();
+						}
+						await sleep(pollMs);
 					}
-					await sleep(pollMs);
+				};
+
+				for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+					try {
+						if (lastSignature !== undefined) {
+							// Previous attempt errored mid-flight; it may still have
+							// landed, so check before rebuilding with a new blockhash.
+							try {
+								const prior = await connection.getSignatureStatuses([
+									lastSignature,
+								]);
+								const priorStatus = prior?.value?.[0];
+								if (
+									priorStatus?.confirmationStatus === "confirmed" ||
+									priorStatus?.confirmationStatus === "finalized"
+								) {
+									console.log(
+										`[${nowStamp()}][${label}] confirmed: ${lastSignature}`,
+									);
+									return lastSignature;
+								}
+								if (priorStatus?.err) {
+									throw new SendError({
+										message: `[${label}] transaction failed: ${JSON.stringify(priorStatus.err)}`,
+									});
+								}
+							} catch (error) {
+								if (error instanceof SendError) {
+									throw error;
+								}
+								// Status check itself failed; rebuild below.
+							}
+						}
+						return await sendOnce(attempt);
+					} catch (error) {
+						if (error instanceof SendError || attempt >= MAX_SEND_ATTEMPTS) {
+							throw error;
+						}
+						console.warn(
+							`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
 				}
+				throw new SendError({
+					message: `[${label}] failed after ${MAX_SEND_ATTEMPTS} attempts`,
+				});
 			},
 			catch: toSendError,
 		});

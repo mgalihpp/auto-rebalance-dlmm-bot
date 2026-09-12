@@ -2,6 +2,7 @@ import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
 import type { StrategyKind } from "./rebalance/plan.ts";
+import { PRIORITY_SETTINGS, type PrioritySetting } from "./rebalance/send.ts";
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
 	message: string;
@@ -13,6 +14,7 @@ export interface BotConfig {
 	slippageBps: number;
 	dryRun: boolean;
 	strategy: StrategyKind;
+	priorityLevel: PrioritySetting;
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
 	pollIntervalMs: number;
@@ -124,6 +126,27 @@ function parseStrategyVar(
 		}),
 	);
 }
+function parsePriorityLevelVar(
+	name: string,
+	raw: string | undefined,
+	fallback: PrioritySetting,
+): Effect.Effect<PrioritySetting, ConfigError> {
+	if (raw === undefined || raw === "") {
+		return Effect.succeed(fallback);
+	}
+	const normalized = raw.trim().toLowerCase();
+	const found = PRIORITY_SETTINGS.find(
+		(level) => level.toLowerCase() === normalized,
+	);
+	if (found !== undefined) {
+		return Effect.succeed(found);
+	}
+	return Effect.fail(
+		new ConfigError({
+			message: `invalid ${name}: expected ${PRIORITY_SETTINGS.join("|")}, got "${raw}"`,
+		}),
+	);
+}
 
 export function loadConfig(
 	env: EnvSource,
@@ -178,6 +201,11 @@ export function loadConfig(
 			optional("STRATEGY", env),
 			"Curve",
 		);
+		const priorityLevel = yield* parsePriorityLevelVar(
+			"PRIORITY_LEVEL",
+			optional("PRIORITY_LEVEL", env),
+			"High",
+		);
 		const jupiterApiKey = optional("JUPITER_API_KEY", env);
 		const pollIntervalMs = yield* parseIntVar(
 			"POLL_INTERVAL_MS",
@@ -193,6 +221,7 @@ export function loadConfig(
 			slippageBps,
 			dryRun,
 			strategy,
+			priorityLevel,
 			jupiterApiKey,
 			secretKey,
 			pollIntervalMs,

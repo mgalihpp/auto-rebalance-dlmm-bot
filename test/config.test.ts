@@ -45,3 +45,28 @@ describe("loadConfig poll interval", () => {
 		expect(error).toBeInstanceOf(ConfigError);
 	});
 });
+
+describe("loadConfig priority level", () => {
+	test("defaults to High when unset", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.priorityLevel).toBe("High");
+	});
+
+	test("accepts any Helius level case-insensitively", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(makeEnv({ PRIORITY_LEVEL: "veryhigh" })),
+		);
+		expect(config.priorityLevel).toBe("VeryHigh");
+	});
+
+	test("accepts Auto for Helius-recommended fee", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(makeEnv({ PRIORITY_LEVEL: "auto" })),
+		);
+		expect(config.priorityLevel).toBe("Auto");
+	});
+	test("rejects unknown levels with ConfigError", async () => {
+		const error = await loadFailure(makeEnv({ PRIORITY_LEVEL: "Ultra" }));
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});

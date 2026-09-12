@@ -17,7 +17,7 @@ import {
 	type TransactionInstruction,
 } from "@solana/web3.js";
 import { Data, Effect } from "effect";
-import { AppSigner, SolanaConnection } from "../services.ts";
+import { AppConfig, AppSigner, SolanaConnection } from "../services.ts";
 import { toStrategyType } from "./dlmm.ts";
 import type { StrategyKind } from "./plan.ts";
 import { nowStamp, sendManualTransaction } from "./send.ts";
@@ -107,15 +107,23 @@ export const planZapRebalance = Effect.fn("planZapRebalance")(function* (
 function sendZapTx(
 	tx: Transaction,
 	label: string,
-): Effect.Effect<string, ZapError, SolanaConnection | AppSigner> {
-	return Effect.mapError(sendManualTransaction({ tx, label }), (error) =>
-		toZapError(error),
-	);
+): Effect.Effect<string, ZapError, SolanaConnection | AppSigner | AppConfig> {
+	return Effect.gen(function* () {
+		const config = yield* AppConfig;
+		return yield* Effect.mapError(
+			sendManualTransaction({
+				tx,
+				label,
+				priorityLevel: config.priorityLevel,
+			}),
+			(error) => toZapError(error),
+		);
+	});
 }
 
 function ensureUserTokenAccounts(
 	lbPair: PublicKey,
-): Effect.Effect<void, ZapError, SolanaConnection | AppSigner> {
+): Effect.Effect<void, ZapError, SolanaConnection | AppSigner | AppConfig> {
 	return Effect.gen(function* () {
 		const connection = yield* SolanaConnection;
 		const signer = yield* AppSigner;
@@ -164,7 +172,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 ): Effect.fn.Return<
 	{ signature: string },
 	ZapError,
-	SolanaConnection | AppSigner
+	SolanaConnection | AppSigner | AppConfig
 > {
 	const signer = yield* AppSigner;
 	const { zap, estimate } = input.plan;

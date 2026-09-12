@@ -151,31 +151,27 @@ export function buildRebalancePlan(
 			!Number.isInteger(snapshot.upperBinId) ||
 			snapshot.upperBinId <= snapshot.lowerBinId
 		) {
-			return yield* Effect.fail(
-				new PlanError({
-					message: `invalid position range: ${snapshot.lowerBinId}-${snapshot.upperBinId}`,
-				}),
-			);
+			return yield* new PlanError({
+				message: `invalid position range: ${snapshot.lowerBinId}-${snapshot.upperBinId}`,
+			});
 		}
 		const halfWidth = originalHalfRange(
 			snapshot.lowerBinId,
 			snapshot.upperBinId,
 		);
 		if (!Number.isInteger(halfWidth) || halfWidth < 1 || halfWidth > 1024) {
-			return yield* Effect.fail(
-				new PlanError({
-					message: `invalid halfWidth: ${halfWidth}`,
-				}),
-			);
+			return yield* new PlanError({
+				message: `invalid halfWidth: ${halfWidth}`,
+			});
 		}
 		if (
 			!Number.isInteger(opts.slippageBps) ||
 			opts.slippageBps < 0 ||
 			opts.slippageBps > 10_000
 		) {
-			return yield* Effect.fail(
-				new PlanError({ message: `invalid slippageBps: ${opts.slippageBps}` }),
-			);
+			return yield* new PlanError({
+				message: `invalid slippageBps: ${opts.slippageBps}`,
+			});
 		}
 
 		// Unclaimed fees are withdrawn on exit but only redeposited when compounding.
@@ -188,9 +184,7 @@ export function buildRebalancePlan(
 		const hasX = haveX.gt(DUST_THRESHOLD);
 		const hasY = haveY.gt(DUST_THRESHOLD);
 		if (!hasX && !hasY) {
-			return yield* Effect.fail(
-				new PlanError({ message: "position holds no liquidity" }),
-			);
+			return yield* new PlanError({ message: "position holds no liquidity" });
 		}
 
 		const mints: TokenMints = {

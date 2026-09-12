@@ -75,6 +75,7 @@ Each poll iteration runs one `Effect.gen`: `loadPositionState` → `shouldRebala
 - `index.ts` — entrypoint, re-exports `src/`.
 - `src/index.ts` — poll loop, preview logging, shutdown handling.
 - `src/config.ts` — env parsing/validation (Effect). Edit here for new env vars.
+- `src/services.ts` — Effect services (`AppConfig`, `SolanaConnection`, `AppSigner`) + live layers (`makeAppLive`).
 - `src/rebalance/dlmm.ts` — pool/position loading, `resolvePosition`.
 - `src/rebalance/plan.ts` — range math (`shouldRebalance`, `originalHalfRange`), offline swap preview.
 - `src/rebalance/zap.ts` — live zap estimate (`planZapRebalance`) + execute.

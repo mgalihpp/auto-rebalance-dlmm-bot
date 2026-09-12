@@ -5,10 +5,8 @@
 //
 // Usage: bun run scripts/test-rebalance.ts --live
 // Without --live this script exits immediately without touching RPC.
-import { Connection, Keypair } from "@solana/web3.js";
 import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
-import { loadConfig } from "../src/config.ts";
 import { loadPositionState } from "../src/rebalance/dlmm.ts";
 import { originalHalfRange } from "../src/rebalance/plan.ts";
 import {
@@ -16,6 +14,7 @@ import {
 	executeZapRebalance,
 	planZapRebalance,
 } from "../src/rebalance/zap.ts";
+import { AppConfig, makeAppLive } from "../src/services.ts";
 
 if (!process.argv.includes("--live")) {
 	console.error("REFUSING: this script sends REAL transactions.");
@@ -30,14 +29,10 @@ await new Promise((resolve) => setTimeout(resolve, 5000));
 loadDotenv();
 
 const main = Effect.gen(function* () {
-	const botConfig = yield* loadConfig(process.env);
-	const connection = new Connection(botConfig.rpcUrl, "confirmed");
-	const signer = Keypair.fromSecretKey(botConfig.secretKey);
+	const botConfig = yield* AppConfig;
 
 	const state = yield* loadPositionState({
-		connection,
 		poolAddress: botConfig.poolAddress,
-		owner: signer.publicKey,
 	});
 	const snapshot = state.snapshot;
 	const halfWidth = originalHalfRange(snapshot.lowerBinId, snapshot.upperBinId);
@@ -48,7 +43,6 @@ const main = Effect.gen(function* () {
 	);
 
 	const plan = yield* planZapRebalance({
-		connection,
 		poolAddress: botConfig.poolAddress,
 		positionAddress: snapshot.position,
 		strategy: botConfig.strategy,
@@ -62,15 +56,11 @@ const main = Effect.gen(function* () {
 			`X=${result.postSwapX.toString()} Y=${result.postSwapY.toString()}`,
 	);
 
-	const done = yield* executeZapRebalance({
-		connection,
-		signer,
-		plan,
-	});
+	const done = yield* executeZapRebalance({ plan });
 	console.log(`Rebalanced via zap: ${done.signature}`);
 });
 
-Effect.runPromise(main).then(
+Effect.runPromise(Effect.provide(main, makeAppLive(process.env))).then(
 	() => process.exit(0),
 	(error) => {
 		console.error("Live rebalance failed:", error);

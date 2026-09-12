@@ -12,13 +12,12 @@ import {
 	Zap,
 } from "@meteora-ag/zap-sdk";
 import {
-	type Connection,
-	type Keypair,
 	PublicKey,
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
 import { Data, Effect } from "effect";
+import { AppSigner, SolanaConnection } from "../services.ts";
 import { toStrategyType } from "./dlmm.ts";
 import type { StrategyKind } from "./plan.ts";
 import { sendManualTransaction } from "./send.ts";
@@ -28,7 +27,6 @@ export class ZapError extends Data.TaggedError("ZapError")<{
 }> {}
 
 export interface ZapPlanInput {
-	connection: Connection;
 	poolAddress: string;
 	positionAddress: string;
 	strategy: StrategyKind;
@@ -46,8 +44,6 @@ export interface ZapPlan {
 }
 
 export interface ZapExecuteInput {
-	connection: Connection;
-	signer: Keypair;
 	plan: ZapPlan;
 }
 
@@ -60,72 +56,68 @@ function toZapError(error: unknown): ZapError {
 // Same engine the Meteora UI uses: simulate the rebalance off-chain for the
 // new delta range, get the exact balancing swap, then build one
 // remove -> swap -> zap-in sequence for the existing position.
-export function planZapRebalance(
+export const planZapRebalance = Effect.fn("planZapRebalance")(function* (
 	input: ZapPlanInput,
-): Effect.Effect<ZapPlan, ZapError> {
-	return Effect.gen(function* () {
-		if (
-			!Number.isInteger(input.halfWidth) ||
-			input.halfWidth < 1 ||
-			input.halfWidth > 1024
-		) {
-			return yield* Effect.fail(
-				new ZapError({ message: `invalid halfWidth: ${input.halfWidth}` }),
-			);
-		}
-		const zapConfig: ZapConfig = {};
-		if (input.jupiterApiKey) {
-			zapConfig.jupiterApiKey = input.jupiterApiKey;
-		}
-		const zap = new Zap(input.connection, zapConfig);
-		const minDeltaId = -input.halfWidth;
-		const maxDeltaId = input.halfWidth;
-		const estimate = yield* Effect.tryPromise({
-			try: () =>
-				estimateDlmmRebalanceSwap({
-					lbPair: new PublicKey(input.poolAddress),
-					position: new PublicKey(input.positionAddress),
-					connection: input.connection,
-					swapSlippageBps: input.slippageBps,
-					minDeltaId,
-					maxDeltaId,
-					strategy: toStrategyType(input.strategy),
-					config: zapConfig,
-				}),
-			catch: toZapError,
+): Effect.fn.Return<ZapPlan, ZapError, SolanaConnection> {
+	if (
+		!Number.isInteger(input.halfWidth) ||
+		input.halfWidth < 1 ||
+		input.halfWidth > 1024
+	) {
+		return yield* new ZapError({
+			message: `invalid halfWidth: ${input.halfWidth}`,
 		});
-		return {
-			zap,
-			estimate,
-			minDeltaId,
-			maxDeltaId,
-			slippageBps: input.slippageBps,
-		} satisfies ZapPlan;
+	}
+	const connection = yield* SolanaConnection;
+	const zapConfig: ZapConfig = {};
+	if (input.jupiterApiKey) {
+		zapConfig.jupiterApiKey = input.jupiterApiKey;
+	}
+	const zap = new Zap(connection, zapConfig);
+	const minDeltaId = -input.halfWidth;
+	const maxDeltaId = input.halfWidth;
+	const estimate = yield* Effect.tryPromise({
+		try: () =>
+			estimateDlmmRebalanceSwap({
+				lbPair: new PublicKey(input.poolAddress),
+				position: new PublicKey(input.positionAddress),
+				connection,
+				swapSlippageBps: input.slippageBps,
+				minDeltaId,
+				maxDeltaId,
+				strategy: toStrategyType(input.strategy),
+				config: zapConfig,
+			}),
+		catch: toZapError,
 	});
-}
-
-function sendZapTx(
-	connection: Connection,
-	tx: Transaction,
-	signer: Keypair,
-): Effect.Effect<string, ZapError> {
-	return Effect.mapError(
-		sendManualTransaction({ connection, tx, signers: [signer] }),
-		(error) => toZapError(error),
-	);
-}
+	return {
+		zap,
+		estimate,
+		minDeltaId,
+		maxDeltaId,
+		slippageBps: input.slippageBps,
+	} satisfies ZapPlan;
+});
 
 // The DLMM RebalanceLiquidity instruction requires both user token accounts
 // to already exist. A wallet that never held one side has no ATA for it, and
 // simulation fails with AccountNotInitialized (3012). The Meteora UI creates
 // the missing ATA first — do the same, using the SDK's own helper so
 // Token-2022 mints resolve to the right program.
+function sendZapTx(
+	tx: Transaction,
+): Effect.Effect<string, ZapError, SolanaConnection | AppSigner> {
+	return Effect.mapError(sendManualTransaction({ tx }), (error) =>
+		toZapError(error),
+	);
+}
+
 function ensureUserTokenAccounts(
-	connection: Connection,
-	signer: Keypair,
 	lbPair: PublicKey,
-): Effect.Effect<void, ZapError> {
+): Effect.Effect<void, ZapError, SolanaConnection | AppSigner> {
 	return Effect.gen(function* () {
+		const connection = yield* SolanaConnection;
+		const signer = yield* AppSigner;
 		const owner = signer.publicKey;
 		const pairState = yield* Effect.tryPromise({
 			try: () => getLbPairState(connection, lbPair),
@@ -156,63 +148,58 @@ function ensureUserTokenAccounts(
 		if (instructions.length === 0) {
 			return;
 		}
-		const signature = yield* sendZapTx(
-			connection,
-			new Transaction().add(...instructions),
-			signer,
-		);
+		const signature = yield* sendZapTx(new Transaction().add(...instructions));
 		console.log(
 			`Created ${instructions.length} missing token account(s): ${signature}`,
 		);
 	});
 }
 
-export function executeZapRebalance(
+export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	input: ZapExecuteInput,
-): Effect.Effect<{ signature: string }, ZapError> {
-	return Effect.gen(function* () {
-		const { zap, estimate } = input.plan;
-		yield* ensureUserTokenAccounts(
-			input.connection,
-			input.signer,
-			estimate.context.lbPair,
-		);
-		const response: RebalanceDlmmPositionResponse = yield* Effect.tryPromise({
-			try: () =>
-				zap.rebalanceDlmmPosition({
-					user: input.signer.publicKey,
-					liquiditySlippageBps: input.plan.slippageBps,
-					favorXInActiveId: false,
-					directSwapEstimate: estimate.result,
-					...estimate.context,
-				}),
-			catch: toZapError,
-		});
-		console.log(
-			`Zap estimate: current X=${response.estimation.currentBalances.tokenX.toString()} ` +
-				`Y=${response.estimation.currentBalances.tokenY.toString()} -> ` +
-				`after swap X=${response.estimation.afterSwap.tokenX.toString()} ` +
-				`Y=${response.estimation.afterSwap.tokenY.toString()}`,
-		);
-		const txs = [
-			response.setupTransaction,
-			response.initBinArrayTransaction,
-			response.rebalancePositionTransaction,
-			response.swapTransaction,
-			response.ledgerTransaction,
-			response.zapInTransaction,
-			response.cleanUpTransaction,
-		];
-		let last = "";
-		for (const tx of txs) {
-			if (!tx) {
-				continue;
-			}
-			last = yield* sendZapTx(input.connection, tx, input.signer);
-		}
-		return { signature: last };
+): Effect.fn.Return<
+	{ signature: string },
+	ZapError,
+	SolanaConnection | AppSigner
+> {
+	const signer = yield* AppSigner;
+	const { zap, estimate } = input.plan;
+	yield* ensureUserTokenAccounts(estimate.context.lbPair);
+	const response: RebalanceDlmmPositionResponse = yield* Effect.tryPromise({
+		try: () =>
+			zap.rebalanceDlmmPosition({
+				user: signer.publicKey,
+				liquiditySlippageBps: input.plan.slippageBps,
+				favorXInActiveId: false,
+				directSwapEstimate: estimate.result,
+				...estimate.context,
+			}),
+		catch: toZapError,
 	});
-}
+	console.log(
+		`Zap estimate: current X=${response.estimation.currentBalances.tokenX.toString()} ` +
+			`Y=${response.estimation.currentBalances.tokenY.toString()} -> ` +
+			`after swap X=${response.estimation.afterSwap.tokenX.toString()} ` +
+			`Y=${response.estimation.afterSwap.tokenY.toString()}`,
+	);
+	const txs = [
+		response.setupTransaction,
+		response.initBinArrayTransaction,
+		response.rebalancePositionTransaction,
+		response.swapTransaction,
+		response.ledgerTransaction,
+		response.zapInTransaction,
+		response.cleanUpTransaction,
+	];
+	let last = "";
+	for (const tx of txs) {
+		if (!tx) {
+			continue;
+		}
+		last = yield* sendZapTx(tx);
+	}
+	return { signature: last };
+});
 
 export function describeZapSwap(estimate: DlmmDirectRebalanceEstimate): string {
 	const result = estimate.result;

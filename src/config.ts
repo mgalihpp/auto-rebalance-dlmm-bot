@@ -20,17 +20,15 @@ export interface BotConfig {
 
 export type EnvSource = Record<string, string | undefined>;
 
-function fail(message: string): Effect.Effect<never, ConfigError> {
-	return Effect.fail(new ConfigError({ message }));
-}
-
 function required(
 	name: string,
 	env: EnvSource,
 ): Effect.Effect<string, ConfigError> {
 	const value = env[name]?.trim();
 	if (!value) {
-		return fail(`missing required env var ${name}`);
+		return Effect.fail(
+			new ConfigError({ message: `missing required env var ${name}` }),
+		);
 	}
 	return Effect.succeed(value);
 }
@@ -52,8 +50,10 @@ function parseIntVar(
 	}
 	const parsed = Number.parseInt(raw, 10);
 	if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-		return fail(
-			`invalid ${name}: expected integer in [${min}, ${max}], got "${raw}"`,
+		return Effect.fail(
+			new ConfigError({
+				message: `invalid ${name}: expected integer in [${min}, ${max}], got "${raw}"`,
+			}),
 		);
 	}
 	return Effect.succeed(parsed);
@@ -66,7 +66,11 @@ function asPublicKey(
 	try {
 		return Effect.succeed(new PublicKey(raw));
 	} catch {
-		return fail(`invalid ${name}: not a valid Solana address`);
+		return Effect.fail(
+			new ConfigError({
+				message: `invalid ${name}: not a valid Solana address`,
+			}),
+		);
 	}
 }
 
@@ -85,7 +89,11 @@ function parseBoolVar(
 	if (normalized === "false" || normalized === "0" || normalized === "no") {
 		return Effect.succeed(false);
 	}
-	return fail(`invalid ${name}: expected true/false, got "${raw}"`);
+	return Effect.fail(
+		new ConfigError({
+			message: `invalid ${name}: expected true/false, got "${raw}"`,
+		}),
+	);
 }
 
 function parseStrategyVar(
@@ -110,7 +118,11 @@ function parseStrategyVar(
 	) {
 		return Effect.succeed("BidAsk");
 	}
-	return fail(`invalid ${name}: expected Spot|Curve|BidAsk, got "${raw}"`);
+	return Effect.fail(
+		new ConfigError({
+			message: `invalid ${name}: expected Spot|Curve|BidAsk, got "${raw}"`,
+		}),
+	);
 }
 
 export function loadConfig(
@@ -121,10 +133,14 @@ export function loadConfig(
 		try {
 			const url = new URL(rpcUrl);
 			if (url.protocol !== "http:" && url.protocol !== "https:") {
-				return yield* fail("invalid RPC_URL: expected http(s) URL");
+				return yield* new ConfigError({
+					message: "invalid RPC_URL: expected http(s) URL",
+				});
 			}
 		} catch {
-			return yield* fail("invalid RPC_URL: expected http(s) URL");
+			return yield* new ConfigError({
+				message: "invalid RPC_URL: expected http(s) URL",
+			});
 		}
 
 		const poolRaw = yield* required("POOL_ADDRESS", env);
@@ -135,10 +151,14 @@ export function loadConfig(
 		try {
 			secretKey = bs58.decode(privateRaw);
 		} catch {
-			return yield* fail("invalid PRIVATE_KEY: not valid bs58");
+			return yield* new ConfigError({
+				message: "invalid PRIVATE_KEY: not valid bs58",
+			});
 		}
 		if (secretKey.length !== 64) {
-			return yield* fail("invalid PRIVATE_KEY: expected 64-byte secret key");
+			return yield* new ConfigError({
+				message: "invalid PRIVATE_KEY: expected 64-byte secret key",
+			});
 		}
 
 		const slippageBps = yield* parseIntVar(

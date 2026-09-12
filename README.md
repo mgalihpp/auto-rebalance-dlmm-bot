@@ -1,6 +1,6 @@
 # Overview
 
-Keeps a [Meteora DLMM](https://docs.meteora.ag/core-products/dlmm/dlmm) liquidity position in range. When price moves out of your position, the bot removes liquidity, swaps the balancing leg, and zaps back in — using the same `@meteora-ag/zap-sdk` engine as the Meteora UI.
+Keeps a [Meteora DLMM](https://docs.meteora.ag/get-started) liquidity position in range. When price moves out of your position, the bot removes liquidity, swaps the balancing leg, and zaps back in — using the same `@meteora-ag/zap-sdk` engine as the Meteora UI.
 
 Built with Bun, TypeScript, and Effect.
 
@@ -149,4 +149,4 @@ Without `--live` it exits immediately without touching RPC. It waits 5 seconds b
 
 - `docs/meteora-llms-full.txt` — DLMM SDK reference (`DLMM.create`, positions, rebalance, fees)
 - `docs/jupiter-llms-full.txt`, `docs/jupiter-llms.txt` — Jupiter Swap API V2 flows
-- [Meteora DLMM docs](https://docs.meteora.ag/core-products/dlmm/dlmm)
+- [Meteora DLMM docs](https://docs.meteora.ag/get-started)

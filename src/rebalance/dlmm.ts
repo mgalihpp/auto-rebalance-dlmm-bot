@@ -3,13 +3,13 @@ import {
 	type Connection,
 	Keypair,
 	PublicKey,
-	sendAndConfirmTransaction,
 	type Transaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import type { PositionSnapshot, StrategyKind } from "./plan.ts";
+import { sendManualTransaction } from "./send.ts";
 
 export class DlmmError extends Data.TaggedError("DlmmError")<{
 	message: string;
@@ -136,17 +136,16 @@ function sendAll(
 	txs: Transaction[],
 	signers: Keypair[],
 ): Effect.Effect<string[], DlmmError> {
-	return Effect.tryPromise({
-		try: async () => {
-			const signatures: string[] = [];
-			for (const tx of txs) {
-				signatures.push(
-					await sendAndConfirmTransaction(connection, tx, signers),
-				);
-			}
-			return signatures;
-		},
-		catch: toDlmmError,
+	return Effect.gen(function* () {
+		const signatures: string[] = [];
+		for (const tx of txs) {
+			const signature = yield* Effect.mapError(
+				sendManualTransaction({ connection, tx, signers }),
+				(error) => toDlmmError(error),
+			);
+			signatures.push(signature);
+		}
+		return signatures;
 	});
 }
 

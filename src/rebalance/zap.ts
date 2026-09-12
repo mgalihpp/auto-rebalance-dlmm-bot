@@ -15,13 +15,13 @@ import {
 	type Connection,
 	type Keypair,
 	PublicKey,
-	sendAndConfirmTransaction,
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
 import { Data, Effect } from "effect";
 import { toStrategyType } from "./dlmm.ts";
 import type { StrategyKind } from "./plan.ts";
+import { sendManualTransaction } from "./send.ts";
 
 export class ZapError extends Data.TaggedError("ZapError")<{
 	message: string;
@@ -109,16 +109,10 @@ function sendZapTx(
 	tx: Transaction,
 	signer: Keypair,
 ): Effect.Effect<string, ZapError> {
-	return Effect.tryPromise({
-		try: async () => {
-			tx.feePayer = signer.publicKey;
-			tx.recentBlockhash = (
-				await connection.getLatestBlockhash("confirmed")
-			).blockhash;
-			return await sendAndConfirmTransaction(connection, tx, [signer]);
-		},
-		catch: toZapError,
-	});
+	return Effect.mapError(
+		sendManualTransaction({ connection, tx, signers: [signer] }),
+		(error) => toZapError(error),
+	);
 }
 
 // The DLMM RebalanceLiquidity instruction requires both user token accounts

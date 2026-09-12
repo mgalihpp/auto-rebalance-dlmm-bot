@@ -52,24 +52,14 @@ function isFunded(candidate: PositionCandidate): boolean {
 export function resolvePosition<T extends PositionCandidate>(
 	candidates: T[],
 ): T {
-	if (candidates.length === 0) {
-		throw new DlmmError({
-			message: "no DLMM position found for owner in this pool",
-		});
-	}
 	const funded = candidates.filter(isFunded);
 	if (funded.length === 0) {
 		throw new DlmmError({
 			message: "no DLMM position found for owner in this pool",
 		});
 	}
-	if (funded.length === 1) {
-		const pick = funded[0];
-		if (pick === undefined) {
-			throw new DlmmError({
-				message: "no DLMM position found for owner in this pool",
-			});
-		}
+	const [pick] = funded;
+	if (pick !== undefined && funded.length === 1) {
 		return pick;
 	}
 	throw new DlmmError({

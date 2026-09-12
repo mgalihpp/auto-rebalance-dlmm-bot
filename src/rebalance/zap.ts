@@ -69,9 +69,9 @@ export function planZapRebalance(
 			input.halfWidth < 1 ||
 			input.halfWidth > 1024
 		) {
-			return yield* Effect.fail(
-				new ZapError({ message: `invalid halfWidth: ${input.halfWidth}` }),
-			);
+			return yield* new ZapError({
+				message: `invalid halfWidth: ${input.halfWidth}`,
+			});
 		}
 		const zapConfig: ZapConfig = {};
 		if (input.jupiterApiKey) {

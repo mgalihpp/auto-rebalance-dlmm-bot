@@ -9,13 +9,13 @@ import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadPositionState } from "../src/rebalance/dlmm.ts";
 import { originalHalfRange } from "../src/rebalance/plan.ts";
-import { nowStamp } from "../src/rebalance/send.ts";
 import {
 	describeZapSwap,
 	executeZapRebalance,
 	planZapRebalance,
 } from "../src/rebalance/zap.ts";
 import { AppConfig, makeAppLive } from "../src/services.ts";
+import { nowStamp } from "../src/utils.ts";
 
 if (!process.argv.includes("--live")) {
 	console.error(

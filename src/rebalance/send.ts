@@ -7,6 +7,7 @@ import {
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
+import { nowStamp } from "../utils.ts";
 
 export class SendError extends Data.TaggedError("SendError")<{
 	message: string;
@@ -60,13 +61,6 @@ function toSendError(error: unknown): SendError {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Local HH:MM:SS stamp so stage logs form a realtime timeline.
-export function nowStamp(): string {
-	const d = new Date();
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export function computeUnitLimitWithBuffer(unitsConsumed: number): number {

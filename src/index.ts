@@ -1,10 +1,7 @@
-import type BN from "bn.js";
-import Decimal from "decimal.js";
 import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
-import { nowStamp } from "./rebalance/send.ts";
 import {
 	describeZapSwap,
 	executeZapRebalance,
@@ -12,12 +9,9 @@ import {
 	type ZapPlan,
 } from "./rebalance/zap.ts";
 import { AppConfig, makeAppLive } from "./services.ts";
+import { formatBn, nowStamp } from "./utils.ts";
 
 loadDotenv();
-
-function formatBn(value: BN): string {
-	return new Decimal(value.toString()).toFixed(0);
-}
 
 function printPreview(
 	plan: ZapPlan,

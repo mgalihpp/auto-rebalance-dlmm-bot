@@ -2,15 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { StrategyType } from "@meteora-ag/dlmm";
 import BN from "bn.js";
 import { Effect } from "effect";
-import { toStrategyType } from "../src/rebalance/dlmm.ts";
 import {
 	buildRebalancePlan,
 	originalHalfRange,
-	type PositionSnapshot,
 	previewSwapDelta,
 	rangeForActiveBin,
 	shouldRebalance,
 } from "../src/rebalance/plan.ts";
+import {
+	type PositionSnapshot,
+	toStrategyType,
+} from "../src/rebalance/types.ts";
 
 const MINTS = { xMint: "MintX111", yMint: "MintY111" };
 

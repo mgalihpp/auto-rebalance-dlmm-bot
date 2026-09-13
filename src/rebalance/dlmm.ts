@@ -1,10 +1,10 @@
-import DLMM, { type LbPosition, StrategyType } from "@meteora-ag/dlmm";
+import DLMM, { type LbPosition } from "@meteora-ag/dlmm";
 import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
-import type { PositionSnapshot, StrategyKind } from "./plan.ts";
+import type { PositionSnapshot } from "./types.ts";
 
 export class DlmmError extends Data.TaggedError("DlmmError")<{
 	message: string;
@@ -70,17 +70,6 @@ export interface LoadedState {
 	dlmm: DLMM;
 	position: LbPosition;
 	snapshot: PositionSnapshot;
-}
-
-export function toStrategyType(kind: StrategyKind): StrategyType {
-	switch (kind) {
-		case "Spot":
-			return StrategyType.Spot;
-		case "Curve":
-			return StrategyType.Curve;
-		case "BidAsk":
-			return StrategyType.BidAsk;
-	}
 }
 
 function toDlmmError(error: unknown): DlmmError {

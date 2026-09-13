@@ -103,7 +103,9 @@ index.ts                  # entrypoint, re-exports src/
 src/
   index.ts                # poll loop, preview logging, shutdown handling
   config.ts               # env parsing / validation (Effect)
+  utils.ts                # shared formatting + time helpers (formatBn, nowStamp)
   rebalance/
+    types.ts              # domain types (StrategyKind, PositionSnapshot, SwapLeg) + SDK mapping
     dlmm.ts               # position + pool state loading
     plan.ts               # range math, shouldRebalance, swap preview
     zap.ts                # zap-sdk estimate + execute

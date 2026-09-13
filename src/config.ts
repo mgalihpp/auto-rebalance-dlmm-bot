@@ -1,8 +1,8 @@
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
-import type { StrategyKind } from "./rebalance/plan.ts";
 import { PRIORITY_SETTINGS, type PrioritySetting } from "./rebalance/send.ts";
+import type { StrategyKind } from "./rebalance/types.ts";
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
 	message: string;

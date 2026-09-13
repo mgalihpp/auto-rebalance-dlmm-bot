@@ -1,10 +1,9 @@
-import DLMM, { type LbPosition, StrategyType } from "@meteora-ag/dlmm";
+import DLMM, { type LbPosition } from "@meteora-ag/dlmm";
 import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
-import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
-import type { PositionSnapshot, StrategyKind } from "./plan.ts";
+import type { PositionSnapshot } from "./types.ts";
 
 export class DlmmError extends Data.TaggedError("DlmmError")<{
 	message: string;
@@ -72,17 +71,6 @@ export interface LoadedState {
 	snapshot: PositionSnapshot;
 }
 
-export function toStrategyType(kind: StrategyKind): StrategyType {
-	switch (kind) {
-		case "Spot":
-			return StrategyType.Spot;
-		case "Curve":
-			return StrategyType.Curve;
-		case "BidAsk":
-			return StrategyType.BidAsk;
-	}
-}
-
 function toDlmmError(error: unknown): DlmmError {
 	return new DlmmError({
 		message: error instanceof Error ? error.message : String(error),
@@ -113,17 +101,6 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 	);
 
 	const data = position.positionData;
-	let activeBinPrice = activeBin.price;
-	try {
-		activeBinPrice = new Decimal(
-			dlmm.fromPricePerLamport(Number(activeBin.price)),
-		)
-			.toSignificantDigits(6)
-			.toString();
-	} catch {
-		activeBinPrice = activeBin.price;
-	}
-
 	const snapshot: PositionSnapshot = {
 		pool: dlmm.pubkey.toBase58(),
 		position: position.publicKey.toBase58(),
@@ -139,7 +116,6 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 		claimedFeeY: data.totalClaimedFeeYAmount,
 		tokenXMint: dlmm.lbPair.tokenXMint.toBase58(),
 		tokenYMint: dlmm.lbPair.tokenYMint.toBase58(),
-		activeBinPrice,
 	};
 	return { dlmm, position, snapshot };
 });

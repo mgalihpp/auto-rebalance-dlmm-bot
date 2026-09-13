@@ -1,23 +1,18 @@
-import type BN from "bn.js";
-import Decimal from "decimal.js";
 import { config as loadDotenv } from "dotenv";
 import { Effect } from "effect";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
-import { nowStamp } from "./rebalance/send.ts";
 import {
+	type CompoundFeesInput,
 	describeZapSwap,
 	executeZapRebalance,
 	planZapRebalance,
 	type ZapPlan,
 } from "./rebalance/zap.ts";
 import { AppConfig, makeAppLive } from "./services.ts";
+import { formatBinRange, formatBn, formatSig, nowStamp } from "./utils.ts";
 
 loadDotenv();
-
-function formatBn(value: BN): string {
-	return new Decimal(value.toString()).toFixed(0);
-}
 
 function printPreview(
 	plan: ZapPlan,
@@ -28,6 +23,7 @@ function printPreview(
 		lowerBinId: number;
 		upperBinId: number;
 	},
+	compound: CompoundFeesInput,
 ) {
 	const result = plan.estimate.result;
 	console.log(`[${nowStamp()}] === DLMM auto-rebalance preview (zap) ===`);
@@ -35,11 +31,11 @@ function printPreview(
 	console.log(`[${nowStamp()}] Position:        ${snapshot.position}`);
 	console.log(`[${nowStamp()}] Active bin:      ${snapshot.activeBinId}`);
 	console.log(
-		`[${nowStamp()}] Current range:   ${snapshot.lowerBinId} - ${snapshot.upperBinId}`,
+		`[${nowStamp()}] Current range:   ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}`,
 	);
 	console.log(
-		`[${nowStamp()}] New range:       active ${snapshot.activeBinId} ` +
-			`delta ${plan.minDeltaId}..${plan.maxDeltaId}`,
+		`[${nowStamp()}] New range:       ${formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId)} ` +
+			`(active ${snapshot.activeBinId} delta ${plan.minDeltaId}..${plan.maxDeltaId})`,
 	);
 	console.log(
 		`[${nowStamp()}] Rebalanced:      X=${formatBn(result.postSwapX)} Y=${formatBn(result.postSwapY)}`,
@@ -48,6 +44,19 @@ function printPreview(
 		`[${nowStamp()}] Swaps required:  ${describeZapSwap(plan.estimate)}`,
 	);
 	console.log(`[${nowStamp()}] Slippage:        ${plan.slippageBps} bps`);
+	if (!compound.enabled) {
+		console.log(
+			`[${nowStamp()}] Compound fees:  disabled — claimed fees stay in the wallet`,
+		);
+	} else if (!compound.feeX.isZero() || !compound.feeY.isZero()) {
+		console.log(
+			`[${nowStamp()}] Compound fees:  enabled — top-up X=${formatBn(compound.feeX)} Y=${formatBn(compound.feeY)} after zap (capped by wallet balance)`,
+		);
+	} else {
+		console.log(
+			`[${nowStamp()}] Compound fees:  enabled — no claimable fees to top up`,
+		);
+	}
 }
 
 let stopped = false;
@@ -93,7 +102,7 @@ function runIteration() {
 			)
 		) {
 			console.log(
-				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
+				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
 			return;
 		}
@@ -110,21 +119,38 @@ function runIteration() {
 			halfWidth,
 			jupiterApiKey: config.jupiterApiKey,
 		});
-		printPreview(plan, {
-			pool: snapshot.pool,
-			position: snapshot.position,
-			activeBinId: snapshot.activeBinId,
-			lowerBinId: snapshot.lowerBinId,
-			upperBinId: snapshot.upperBinId,
-		});
+		const compound: CompoundFeesInput = {
+			enabled: config.compoundFees,
+			dlmm: state.dlmm,
+			positionAddress: snapshot.position,
+			feeX: snapshot.feeX,
+			feeY: snapshot.feeY,
+			minBinId: snapshot.activeBinId - halfWidth,
+			maxBinId: snapshot.activeBinId + halfWidth,
+			strategy: config.strategy,
+			slippageBps: config.slippageBps,
+		};
+		printPreview(
+			plan,
+			{
+				pool: snapshot.pool,
+				position: snapshot.position,
+				activeBinId: snapshot.activeBinId,
+				lowerBinId: snapshot.lowerBinId,
+				upperBinId: snapshot.upperBinId,
+			},
+			compound,
+		);
 
 		if (config.dryRun) {
 			console.log(`[${nowStamp()}] Dry run — no transactions sent.`);
 			return;
 		}
 
-		const done = yield* executeZapRebalance({ plan });
-		console.log(`[${nowStamp()}] Rebalanced via zap: ${done.signature}`);
+		const done = yield* executeZapRebalance({ plan, compound });
+		console.log(
+			`[${nowStamp()}] Rebalanced via zap position ${snapshot.position}: ${formatSig(done.signature)}`,
+		);
 	});
 }
 

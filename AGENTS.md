@@ -37,7 +37,7 @@ Real funds. These are the only three ways to cause real damage here:
 
 1. **Sending real transactions.** `bun run scripts/test-rebalance.ts --live` ignores `DRY_RUN` and the range gate and sends REAL transactions (5s abort window). Without `--live` it exits(2) without touching RPC. `DRY_RUN=false` in the poll loop also sends. Never run `--live` or set `DRY_RUN=false` unless I explicitly asked for it, in this exact session, for this exact command.
 2. **Leaking the key.** Never commit `.env` (gitignored) or log `PRIVATE_KEY` (bs58, 64 bytes). Never print `secretKey`, keypairs, or full `.env` contents. Default to `DRY_RUN=true`.
-3. **Breaking money math or the SDK pin.** `@solana/web3.js` must stay on v1 — DLMM SDK and the zap flow depend on the v1 API. Amounts are `bn.js`, price/bin display is `decimal.js`. Never floats for amounts. `DUST_THRESHOLD = 1000` in `plan.ts` gates dust swaps — don't remove it to "simplify".
+3. **Breaking money math or the SDK pin.** `@solana/web3.js` must stay on v1 — DLMM SDK and the zap flow depend on the v1 API. Amounts are `bn.js`, price/bin display is `decimal.js`. Never floats for amounts.
 
 ## Close the loop
 
@@ -68,7 +68,7 @@ The most common defect here is a change that previews correctly and fails on sen
 
 ## How it works
 
-Each poll iteration runs one `Effect.gen`: `loadPositionState` → `shouldRebalance` → `planZapRebalance` (off-chain estimate + preview log) → `executeZapRebalance` (unless dry run). Errors are `Data.TaggedError` (`ConfigError`/`PlanError`/`DlmmError`/`ZapError`/`SendError`) surfaced via `Effect.runPromise`. `SIGINT`/`SIGTERM` shut the loop down gracefully; the loop sleeps `POLL_INTERVAL_MS` between iterations and wakes early on shutdown.
+Each poll iteration runs one `Effect.gen`: `loadPositionState` → `shouldRebalance` → `planZapRebalance` (off-chain estimate + preview log) → `executeZapRebalance` (unless dry run). Errors are `Data.TaggedError` (`ConfigError`/`DlmmError`/`ZapError`/`SendError`) surfaced via `Effect.runPromise`. `SIGINT`/`SIGTERM` shut the loop down gracefully; the loop sleeps `POLL_INTERVAL_MS` between iterations and wakes early on shutdown.
 
 ## Where code lives
 
@@ -77,7 +77,7 @@ Each poll iteration runs one `Effect.gen`: `loadPositionState` → `shouldRebala
 - `src/config.ts` — env parsing/validation (Effect). Edit here for new env vars.
 - `src/services.ts` — Effect services (`AppConfig`, `SolanaConnection`, `AppSigner`) + live layers (`makeAppLive`).
 - `src/rebalance/dlmm.ts` — pool/position loading, `resolvePosition`.
-- `src/rebalance/plan.ts` — range math (`shouldRebalance`, `originalHalfRange`), offline swap preview.
+- `src/rebalance/plan.ts` — range math (`shouldRebalance`, `originalHalfRange`).
 - `src/rebalance/zap.ts` — live zap estimate (`planZapRebalance`) + execute.
 - `src/rebalance/send.ts` — transaction send pipeline.
 - `scripts/test-rebalance.ts` — manual one-shot live trigger (`--live` only). No drift gate, no dry-run, no loop.

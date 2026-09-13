@@ -7,6 +7,7 @@ import {
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
+import { formatSig, nowStamp } from "../utils.ts";
 
 export class SendError extends Data.TaggedError("SendError")<{
 	message: string;
@@ -62,13 +63,6 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Local HH:MM:SS stamp so stage logs form a realtime timeline.
-export function nowStamp(): string {
-	const d = new Date();
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
 export function computeUnitLimitWithBuffer(unitsConsumed: number): number {
 	if (!Number.isFinite(unitsConsumed) || unitsConsumed <= 0) {
 		throw new SendError({
@@ -122,20 +116,6 @@ export function parsePriorityFeeEstimate(payload: unknown): number {
 		return 0;
 	}
 	return Math.max(0, Math.floor(estimate));
-}
-
-export function withComputeBudget(
-	tx: Transaction,
-	cuLimit: number,
-	microLamports: number,
-): Transaction {
-	const base = stripComputeBudgetInstructions(tx.instructions);
-	const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
-	const rebuilt = new Transaction().add(...budget, ...base);
-	if (tx.feePayer) {
-		rebuilt.feePayer = tx.feePayer;
-	}
-	return rebuilt;
 }
 
 // Pulls `{ error: { message } }` out of a fee-estimate payload for the
@@ -256,7 +236,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 						priorityLevel,
 					);
 					console.log(
-						`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: used=${unitsConsumed} limit=${cuLimit} fee=${microLamports}uL(${priorityLevel}) ixs=${base.length}`,
+						`[${nowStamp()}] [${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: used=${unitsConsumed} limit=${cuLimit} fee=${microLamports}uL(${priorityLevel}) ixs=${base.length}`,
 					);
 					const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
 
@@ -301,7 +281,9 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 							status?.confirmationStatus === "confirmed" ||
 							status?.confirmationStatus === "finalized"
 						) {
-							console.log(`[${nowStamp()}][${label}] confirmed: ${signature}`);
+							console.log(
+								`[${nowStamp()}] [${label}] confirmed: ${formatSig(signature)}`,
+							);
 							return signature;
 						}
 						let currentHeight: number;
@@ -344,7 +326,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 									priorStatus?.confirmationStatus === "finalized"
 								) {
 									console.log(
-										`[${nowStamp()}][${label}] confirmed: ${lastSignature}`,
+										`[${nowStamp()}] [${label}] confirmed: ${formatSig(lastSignature)}`,
 									);
 									return lastSignature;
 								}
@@ -366,7 +348,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 							throw error;
 						}
 						console.warn(
-							`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
+							`[${nowStamp()}] [${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
 				}

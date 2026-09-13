@@ -163,6 +163,16 @@ async function fetchPriorityFeeEstimate(
 		const payload: unknown = await response.json();
 		const estimate = parsePriorityFeeEstimate(payload);
 		if (estimate === 0) {
+			// Helius legitimately returns 0 during quiet periods (especially
+			// at Low/Min). Only warn when the payload has no usable estimate.
+			const raw =
+				typeof payload === "object" && payload !== null
+					? (payload as { result?: { priorityFeeEstimate?: unknown } }).result
+							?.priorityFeeEstimate
+					: undefined;
+			if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+				return 0;
+			}
 			// Helius answers API misuse with a 200 + { error } payload, which
 			// parses to 0. Never go quiet-fee: surface the reason in the log.
 			console.warn(

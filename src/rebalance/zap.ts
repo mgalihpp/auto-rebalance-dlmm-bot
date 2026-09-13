@@ -21,7 +21,7 @@ import {
 import BN from "bn.js";
 import { Data, Effect } from "effect";
 import { AppConfig, AppSigner, SolanaConnection } from "../services.ts";
-import { nowStamp } from "../utils.ts";
+import { formatSig, nowStamp } from "../utils.ts";
 import { sendManualTransaction } from "./send.ts";
 import { type StrategyKind, toStrategyType } from "./types.ts";
 
@@ -201,7 +201,7 @@ function ensureUserTokenAccounts(
 			"create-atas",
 		);
 		console.log(
-			`[${nowStamp()}] Created ${instructions.length} missing token account(s): ${signature}`,
+			`[${nowStamp()}] Created ${instructions.length} missing token account(s): ${formatSig(signature)}`,
 		);
 	});
 }
@@ -294,7 +294,7 @@ function executeCompoundTopUp(
 		});
 		const signature = yield* sendZapTx(tx, "compound-fees");
 		console.log(
-			`[${nowStamp()}] Compounded fees: X=${amounts.x.toString()} Y=${amounts.y.toString()}: ${signature}`,
+			`[${nowStamp()}] Compounded fees: X=${amounts.x.toString()} Y=${amounts.y.toString()}: ${formatSig(signature)}`,
 		);
 		return signature;
 	});
@@ -322,10 +322,11 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		catch: toZapError,
 	});
 	console.log(
-		`[${nowStamp()}] Zap estimate: current X=${response.estimation.currentBalances.tokenX.toString()} ` +
-			`Y=${response.estimation.currentBalances.tokenY.toString()} -> ` +
-			`after swap X=${response.estimation.afterSwap.tokenX.toString()} ` +
-			`Y=${response.estimation.afterSwap.tokenY.toString()}`,
+		`[${nowStamp()}] Zap estimate: current balances X=${response.estimation.currentBalances.tokenX.toString()} ` +
+			`Y=${response.estimation.currentBalances.tokenY.toString()} | ` +
+			`after-swap balances X=${response.estimation.afterSwap.tokenX.toString()} ` +
+			`Y=${response.estimation.afterSwap.tokenY.toString()} | ` +
+			`swap ${describeZapSwap(estimate)}`,
 	);
 	const txs: Array<readonly [string, Transaction | null | undefined]> = [
 		["setup", response.setupTransaction],

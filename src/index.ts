@@ -10,7 +10,7 @@ import {
 	type ZapPlan,
 } from "./rebalance/zap.ts";
 import { AppConfig, makeAppLive } from "./services.ts";
-import { formatBn, nowStamp } from "./utils.ts";
+import { formatBinRange, formatBn, formatSig, nowStamp } from "./utils.ts";
 
 loadDotenv();
 
@@ -31,11 +31,11 @@ function printPreview(
 	console.log(`[${nowStamp()}] Position:        ${snapshot.position}`);
 	console.log(`[${nowStamp()}] Active bin:      ${snapshot.activeBinId}`);
 	console.log(
-		`[${nowStamp()}] Current range:   ${snapshot.lowerBinId} - ${snapshot.upperBinId}`,
+		`[${nowStamp()}] Current range:   ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}`,
 	);
 	console.log(
-		`[${nowStamp()}] New range:       active ${snapshot.activeBinId} ` +
-			`delta ${plan.minDeltaId}..${plan.maxDeltaId}`,
+		`[${nowStamp()}] New range:       ${formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId)} ` +
+			`(active ${snapshot.activeBinId} delta ${plan.minDeltaId}..${plan.maxDeltaId})`,
 	);
 	console.log(
 		`[${nowStamp()}] Rebalanced:      X=${formatBn(result.postSwapX)} Y=${formatBn(result.postSwapY)}`,
@@ -102,7 +102,7 @@ function runIteration() {
 			)
 		) {
 			console.log(
-				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${snapshot.lowerBinId}-${snapshot.upperBinId}) — no rebalance needed.`,
+				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
 			return;
 		}
@@ -148,7 +148,9 @@ function runIteration() {
 		}
 
 		const done = yield* executeZapRebalance({ plan, compound });
-		console.log(`[${nowStamp()}] Rebalanced via zap: ${done.signature}`);
+		console.log(
+			`[${nowStamp()}] Rebalanced via zap position ${snapshot.position}: ${formatSig(done.signature)}`,
+		);
 	});
 }
 

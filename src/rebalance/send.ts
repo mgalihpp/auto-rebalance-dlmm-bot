@@ -7,7 +7,7 @@ import {
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
-import { nowStamp } from "../utils.ts";
+import { formatSig, nowStamp } from "../utils.ts";
 
 export class SendError extends Data.TaggedError("SendError")<{
 	message: string;
@@ -236,7 +236,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 						priorityLevel,
 					);
 					console.log(
-						`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: used=${unitsConsumed} limit=${cuLimit} fee=${microLamports}uL(${priorityLevel}) ixs=${base.length}`,
+						`[${nowStamp()}] [${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: used=${unitsConsumed} limit=${cuLimit} fee=${microLamports}uL(${priorityLevel}) ixs=${base.length}`,
 					);
 					const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
 
@@ -281,7 +281,9 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 							status?.confirmationStatus === "confirmed" ||
 							status?.confirmationStatus === "finalized"
 						) {
-							console.log(`[${nowStamp()}][${label}] confirmed: ${signature}`);
+							console.log(
+								`[${nowStamp()}] [${label}] confirmed: ${formatSig(signature)}`,
+							);
 							return signature;
 						}
 						let currentHeight: number;
@@ -324,7 +326,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 									priorStatus?.confirmationStatus === "finalized"
 								) {
 									console.log(
-										`[${nowStamp()}][${label}] confirmed: ${lastSignature}`,
+										`[${nowStamp()}] [${label}] confirmed: ${formatSig(lastSignature)}`,
 									);
 									return lastSignature;
 								}
@@ -346,7 +348,7 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 							throw error;
 						}
 						console.warn(
-							`[${nowStamp()}][${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
+							`[${nowStamp()}] [${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
 				}

@@ -3,22 +3,6 @@ import type BN from "bn.js";
 
 export type StrategyKind = "Spot" | "Curve" | "BidAsk";
 
-export interface StrategyRange {
-	kind: StrategyKind;
-	minBinId: number;
-	maxBinId: number;
-}
-
-export type SwapDirection = "XtoY" | "YtoX" | "None";
-
-export interface SwapLeg {
-	direction: SwapDirection;
-	inMint: string;
-	outMint: string;
-	inAmount: BN;
-	minOutAmount: BN;
-}
-
 export interface PositionSnapshot {
 	pool: string;
 	position: string;
@@ -34,33 +18,6 @@ export interface PositionSnapshot {
 	claimedFeeY: BN;
 	tokenXMint: string;
 	tokenYMint: string;
-	activeBinPrice?: string;
-}
-
-export interface RebalancePlan {
-	pool: string;
-	position: string;
-	activeBinId: number;
-	currentX: BN;
-	currentY: BN;
-	claimedFeeX: BN;
-	claimedFeeY: BN;
-	targetX: BN;
-	targetY: BN;
-	strategy: StrategyRange;
-	swap: SwapLeg;
-	slippageBps: number;
-}
-
-export interface PlanOptions {
-	slippageBps: number;
-	compoundFees: boolean;
-	strategy: StrategyKind;
-}
-
-export interface TokenMints {
-	xMint: string;
-	yMint: string;
 }
 
 export function toStrategyType(kind: StrategyKind): StrategyType {

@@ -118,20 +118,6 @@ export function parsePriorityFeeEstimate(payload: unknown): number {
 	return Math.max(0, Math.floor(estimate));
 }
 
-export function withComputeBudget(
-	tx: Transaction,
-	cuLimit: number,
-	microLamports: number,
-): Transaction {
-	const base = stripComputeBudgetInstructions(tx.instructions);
-	const budget = buildComputeBudgetInstructions(cuLimit, microLamports);
-	const rebuilt = new Transaction().add(...budget, ...base);
-	if (tx.feePayer) {
-		rebuilt.feePayer = tx.feePayer;
-	}
-	return rebuilt;
-}
-
 // Pulls `{ error: { message } }` out of a fee-estimate payload for the
 // no-estimate warning. Anything else means a non-Helius RPC.
 function feeErrorReason(payload: unknown): string {

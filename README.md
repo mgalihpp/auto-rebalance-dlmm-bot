@@ -105,9 +105,9 @@ src/
   config.ts               # env parsing / validation (Effect)
   utils.ts                # shared formatting + time helpers (formatBn, nowStamp)
   rebalance/
-    types.ts              # domain types (StrategyKind, PositionSnapshot, SwapLeg) + SDK mapping
+    types.ts              # domain types (StrategyKind, PositionSnapshot) + SDK mapping
     dlmm.ts               # position + pool state loading
-    plan.ts               # range math, shouldRebalance, swap preview
+    plan.ts               # range math (`shouldRebalance`, `originalHalfRange`)
     zap.ts                # zap-sdk estimate + execute
     send.ts               # transaction sending
 scripts/

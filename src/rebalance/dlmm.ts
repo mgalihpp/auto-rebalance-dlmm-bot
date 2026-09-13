@@ -1,7 +1,6 @@
 import DLMM, { type LbPosition } from "@meteora-ag/dlmm";
 import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
-import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
 import type { PositionSnapshot } from "./types.ts";
@@ -102,17 +101,6 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 	);
 
 	const data = position.positionData;
-	let activeBinPrice = activeBin.price;
-	try {
-		activeBinPrice = new Decimal(
-			dlmm.fromPricePerLamport(Number(activeBin.price)),
-		)
-			.toSignificantDigits(6)
-			.toString();
-	} catch {
-		activeBinPrice = activeBin.price;
-	}
-
 	const snapshot: PositionSnapshot = {
 		pool: dlmm.pubkey.toBase58(),
 		position: position.publicKey.toBase58(),
@@ -128,7 +116,6 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 		claimedFeeY: data.totalClaimedFeeYAmount,
 		tokenXMint: dlmm.lbPair.tokenXMint.toBase58(),
 		tokenYMint: dlmm.lbPair.tokenYMint.toBase58(),
-		activeBinPrice,
 	};
 	return { dlmm, position, snapshot };
 });

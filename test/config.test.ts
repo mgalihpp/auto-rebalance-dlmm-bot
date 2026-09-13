@@ -70,3 +70,35 @@ describe("loadConfig priority level", () => {
 		expect(error).toBeInstanceOf(ConfigError);
 	});
 });
+
+describe("loadConfig compound fees", () => {
+	test("defaults to false when unset", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.compoundFees).toBe(false);
+	});
+
+	test.each(["true", "1", "yes", "TRUE", "Yes"])(
+		"accepts %s as true",
+		async (value) => {
+			const config = await Effect.runPromise(
+				loadConfig(makeEnv({ COMPOUND_FEES: value })),
+			);
+			expect(config.compoundFees).toBe(true);
+		},
+	);
+
+	test.each(["false", "0", "no", "FALSE", "No"])(
+		"accepts %s as false",
+		async (value) => {
+			const config = await Effect.runPromise(
+				loadConfig(makeEnv({ COMPOUND_FEES: value })),
+			);
+			expect(config.compoundFees).toBe(false);
+		},
+	);
+
+	test("rejects invalid values with ConfigError", async () => {
+		const error = await loadFailure(makeEnv({ COMPOUND_FEES: "sometimes" }));
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});

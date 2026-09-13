@@ -1,3 +1,4 @@
+import type DLMM from "@meteora-ag/dlmm";
 import type {
 	DlmmDirectRebalanceEstimate,
 	RebalanceDlmmPositionResponse,
@@ -8,6 +9,7 @@ import {
 	estimateDlmmRebalanceSwap,
 	getLbPairState,
 	getOrCreateATAInstruction,
+	getTokenAccountBalance,
 	getTokenProgramFromMint,
 	Zap,
 } from "@meteora-ag/zap-sdk";
@@ -16,6 +18,7 @@ import {
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
+import BN from "bn.js";
 import { Data, Effect } from "effect";
 import { AppConfig, AppSigner, SolanaConnection } from "../services.ts";
 import { nowStamp } from "../utils.ts";
@@ -45,6 +48,42 @@ export interface ZapPlan {
 
 export interface ZapExecuteInput {
 	plan: ZapPlan;
+	compound: CompoundFeesInput;
+}
+
+// Opt-in redeposit of the fees the zap claims to the user ATAs. The zap
+// sizes its swap from position liquidity only, so claimed fees sit in the
+// wallet after a rebalance unless this top-up deposits them back.
+export interface CompoundFeesInput {
+	enabled: boolean;
+	dlmm: DLMM;
+	positionAddress: string;
+	feeX: BN;
+	feeY: BN;
+	minBinId: number;
+	maxBinId: number;
+	strategy: StrategyKind;
+	slippageBps: number;
+}
+
+// Pure cap: each leg deposits at most the claimed fee and at most the wallet
+// balance. Negatives count as zero; null means there is nothing to deposit.
+export function compoundTopUpAmounts(
+	feeX: BN,
+	feeY: BN,
+	balX: BN,
+	balY: BN,
+): { x: BN; y: BN } | null {
+	const flooredFeeX = feeX.isNeg() ? new BN(0) : feeX;
+	const flooredFeeY = feeY.isNeg() ? new BN(0) : feeY;
+	const flooredBalX = balX.isNeg() ? new BN(0) : balX;
+	const flooredBalY = balY.isNeg() ? new BN(0) : balY;
+	const x = flooredFeeX.lt(flooredBalX) ? flooredFeeX : flooredBalX;
+	const y = flooredFeeY.lt(flooredBalY) ? flooredFeeY : flooredBalY;
+	if (x.isZero() && y.isZero()) {
+		return null;
+	}
+	return { x, y };
 }
 
 function toZapError(error: unknown): ZapError {
@@ -167,6 +206,100 @@ function ensureUserTokenAccounts(
 	});
 }
 
+// Wallet balance of one side's ATA. ensureUserTokenAccounts runs earlier in
+// the same execute, so the ATA already exists and the helper's `ix` is null.
+function readAtaBalance(
+	mint: PublicKey,
+): Effect.Effect<BN, ZapError, SolanaConnection | AppSigner> {
+	return Effect.gen(function* () {
+		const connection = yield* SolanaConnection;
+		const signer = yield* AppSigner;
+		const tokenProgram = yield* Effect.tryPromise({
+			try: () => getTokenProgramFromMint(connection, mint),
+			catch: toZapError,
+		});
+		const { ataPubkey } = yield* Effect.tryPromise({
+			try: () =>
+				getOrCreateATAInstruction(
+					connection,
+					mint,
+					signer.publicKey,
+					signer.publicKey,
+					false,
+					tokenProgram,
+				),
+			catch: toZapError,
+		});
+		const raw = yield* Effect.tryPromise({
+			try: () => getTokenAccountBalance(connection, ataPubkey),
+			catch: toZapError,
+		});
+		return yield* Effect.try({
+			try: () => new BN(raw),
+			catch: (error) => toZapError(error),
+		});
+	});
+}
+
+// Conditional post-zap step: deposit the claimed fees back into the new
+// range. Returns the top-up signature, or null when skipped.
+function executeCompoundTopUp(
+	input: CompoundFeesInput,
+): Effect.Effect<
+	string | null,
+	ZapError,
+	SolanaConnection | AppSigner | AppConfig
+> {
+	return Effect.gen(function* () {
+		if (!input.enabled) {
+			return null;
+		}
+		const zero = new BN(0);
+		if (input.feeX.lte(zero) && input.feeY.lte(zero)) {
+			console.log(`[${nowStamp()}] Compound fees skipped: no claimable fees.`);
+			return null;
+		}
+		const connection = yield* SolanaConnection;
+		const signer = yield* AppSigner;
+		const pairState = yield* Effect.tryPromise({
+			try: () => getLbPairState(connection, input.dlmm.pubkey),
+			catch: toZapError,
+		});
+		const balX = yield* readAtaBalance(pairState.tokenXMint);
+		const balY = yield* readAtaBalance(pairState.tokenYMint);
+		const amounts = compoundTopUpAmounts(input.feeX, input.feeY, balX, balY);
+		if (amounts === null) {
+			console.log(
+				`[${nowStamp()}] Compound fees skipped: wallet balance covers none of the claimed fees.`,
+			);
+			return null;
+		}
+		// DLMM add-liquidity slippage is a percentage (0-100), not bps: the
+		// SDK caps it at 100 and scales it by bin step.
+		const tx = yield* Effect.tryPromise({
+			try: () =>
+				input.dlmm.addLiquidityByStrategy({
+					positionPubKey: new PublicKey(input.positionAddress),
+					totalXAmount: amounts.x,
+					totalYAmount: amounts.y,
+					strategy: {
+						minBinId: input.minBinId,
+						maxBinId: input.maxBinId,
+						strategyType: toStrategyType(input.strategy),
+					},
+					user: signer.publicKey,
+					slippage: input.slippageBps / 100,
+				}),
+			catch: toZapError,
+		});
+		const signature = yield* sendZapTx(tx, "compound-fees");
+		console.log(
+			`[${nowStamp()}] Compounded fees: X=${amounts.x.toString()} Y=${amounts.y.toString()}: ${signature}`,
+		);
+		return signature;
+	});
+}
+
 export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	input: ZapExecuteInput,
 ): Effect.fn.Return<
@@ -210,7 +343,8 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		}
 		last = yield* sendZapTx(tx, label);
 	}
-	return { signature: last };
+	const topUp = yield* executeCompoundTopUp(input.compound);
+	return { signature: topUp ?? last };
 });
 
 export function describeZapSwap(estimate: DlmmDirectRebalanceEstimate): string {

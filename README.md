@@ -60,6 +60,7 @@ The bot starts in `DRY_RUN=true` by default, so it only prints what it *would* d
 | `POOL_ADDRESS` | Yes | — | DLMM pool address the bot manages |
 | `PRIVATE_KEY` | Yes | — | Wallet secret key (bs58, 64 bytes) |
 | `DRY_RUN` | No | `true` | If `true`, preview only — no transactions are sent |
+| `COMPOUND_FEES` | No | `false` | If `true`, redeposit claimed fees back into the position after a rebalance; if `false`, claimed fees stay in the wallet |
 | `SLIPPAGE_BPS` | No | `50` | Slippage tolerance in basis points (0–10000) |
 | `STRATEGY` | No | `Curve` | Liquidity shape: `Spot`, `Curve`, or `BidAsk` |
 | `JUPITER_API_KEY` | No | — | Optional Jupiter API key for zap routing |

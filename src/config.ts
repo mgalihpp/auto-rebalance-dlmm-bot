@@ -13,6 +13,7 @@ export interface BotConfig {
 	poolAddress: string;
 	slippageBps: number;
 	dryRun: boolean;
+	compoundFees: boolean;
 	strategy: StrategyKind;
 	priorityLevel: PrioritySetting;
 	jupiterApiKey?: string;
@@ -196,6 +197,11 @@ export function loadConfig(
 			optional("DRY_RUN", env),
 			true,
 		);
+		const compoundFees = yield* parseBoolVar(
+			"COMPOUND_FEES",
+			optional("COMPOUND_FEES", env),
+			false,
+		);
 		const strategy = yield* parseStrategyVar(
 			"STRATEGY",
 			optional("STRATEGY", env),
@@ -220,6 +226,7 @@ export function loadConfig(
 			poolAddress: poolKey.toBase58(),
 			slippageBps,
 			dryRun,
+			compoundFees,
 			strategy,
 			priorityLevel,
 			jupiterApiKey,

@@ -65,6 +65,9 @@ The bot starts in `DRY_RUN=true` by default, so it only prints what it *would* d
 | `STRATEGY` | No | `Curve` | Liquidity shape: `Spot`, `Curve`, or `BidAsk` |
 | `JUPITER_API_KEY` | No | — | Optional Jupiter API key for zap routing |
 | `POLL_INTERVAL_MS` | No | `60000` | Recheck interval in ms (5000–3600000) |
+| `TELEGRAM_BOT_TOKEN` | No | — | Bot token for Telegram alerts + commands (both Telegram vars set enables it, both empty disables it) |
+| `TELEGRAM_CHAT_ID` | No | — | Private chat id the bot talks to (only this chat is answered) |
+| `TELEGRAM_POLL_INTERVAL_MS` | No | `3000` | Telegram command poll interval in ms (1000–60000), separate from `POLL_INTERVAL_MS` |
 
 Stop the bot with `Ctrl+C` (`SIGINT`/`SIGTERM` are handled gracefully).
 
@@ -97,7 +100,19 @@ Live run:
 Rebalanced via zap: <transaction-signature>
 ```
 
-## Project structure
+## Telegram
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to get private chat alerts
+(startup, shutdown, rebalance needed with preview, rebalanced with Solscan
+link, iteration failure). Healthy polls stay silent.
+
+Commands are answered within one `TELEGRAM_POLL_INTERVAL_MS`:
+
+- `/status` — read-only position snapshot
+- `/help` — list commands
+- `/rebalance` — preview only, never sends
+- `/rebalance confirm` — queues a live execution, which runs serialized with
+  the main loop (still preview-only while `DRY_RUN=true`)
 
 ```text
 index.ts                  # entrypoint, re-exports src/
@@ -105,6 +120,9 @@ src/
   index.ts                # poll loop, preview logging, shutdown handling
   config.ts               # env parsing / validation (Effect)
   utils.ts                # shared formatting + time helpers (formatBn, nowStamp)
+  telegram/
+    notify.ts             # Telegram event formatting + sending (HTML, no new deps)
+    commands.ts           # chat command parsing + live-confirm handoff
   rebalance/
     types.ts              # domain types (StrategyKind, PositionSnapshot) + SDK mapping
     dlmm.ts               # position + pool state loading

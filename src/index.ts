@@ -1,5 +1,5 @@
 import { config as loadDotenv } from "dotenv";
-import { Effect } from "effect";
+import { Effect, Ref } from "effect";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
@@ -9,11 +9,20 @@ import {
 	planZapRebalance,
 	type ZapPlan,
 } from "./rebalance/zap.ts";
-import { AppConfig, makeAppLive } from "./services.ts";
+import {
+	AppConfig,
+	makeAppLive,
+	persistEnvKey,
+	RuntimeTunables,
+} from "./services.ts";
 import {
 	type BotCommand,
+	clearPendingLiveConfirm,
+	EDITABLE_KEYS,
+	EDITABLE_REGISTRY,
 	fetchTelegramUpdates,
 	nextUpdatesOffset,
+	normalizeEditableKey,
 	parseBotCommand,
 	queuePendingLiveConfirm,
 	shouldDeferLiveConfirm,
@@ -22,8 +31,16 @@ import {
 } from "./telegram/commands.ts";
 import {
 	answerTelegramCallback,
+	configMenuKeyboard,
+	configValueKeyboard,
 	confirmInlineKeyboard,
 	escapeHtml,
+	formatConfigBadValue,
+	formatConfigPick,
+	formatConfigPreview,
+	formatConfigShow,
+	formatConfigUnknownKey,
+	formatConfigUpdated,
 	formatInRangeReply,
 	formatPreviewReply,
 	formatStatusReply,
@@ -38,6 +55,7 @@ import {
 	formatSig,
 	formatTokenAmount,
 	nowStamp,
+	shortAddr,
 } from "./utils.ts";
 
 loadDotenv();
@@ -136,8 +154,13 @@ const boot = await Effect.runPromise(
 	process.exit(1);
 });
 
-const pollIntervalMs = boot.pollIntervalMs;
-const telegramPollIntervalMs = boot.telegramPollIntervalMs;
+// Single snapshot read per iteration. Telegram is the only writer.
+function getTunables() {
+	return Effect.gen(function* () {
+		const ref = yield* RuntimeTunables;
+		return yield* Ref.get(ref);
+	});
+}
 
 await Effect.runPromise(
 	Effect.provide(
@@ -165,8 +188,9 @@ await Effect.runPromise(
 function runIteration() {
 	return Effect.gen(function* () {
 		const config = yield* AppConfig;
+		const tunables = yield* getTunables();
 		const state = yield* loadPositionState({
-			poolAddress: config.poolAddress,
+			poolAddress: tunables.poolAddress,
 		});
 		const snapshot = state.snapshot;
 
@@ -188,23 +212,23 @@ function runIteration() {
 			snapshot.upperBinId,
 		);
 		const plan = yield* planZapRebalance({
-			poolAddress: config.poolAddress,
+			poolAddress: tunables.poolAddress,
 			positionAddress: snapshot.position,
-			strategy: config.strategy,
-			slippageBps: config.slippageBps,
+			strategy: tunables.strategy,
+			slippageBps: tunables.slippageBps,
 			halfWidth,
 			jupiterApiKey: config.jupiterApiKey,
 		});
 		const compound: CompoundFeesInput = {
-			enabled: config.compoundFees,
+			enabled: tunables.compoundFees,
 			dlmm: state.dlmm,
 			positionAddress: snapshot.position,
 			feeX: snapshot.feeX,
 			feeY: snapshot.feeY,
 			minBinId: snapshot.activeBinId - halfWidth,
 			maxBinId: snapshot.activeBinId + halfWidth,
-			strategy: config.strategy,
-			slippageBps: config.slippageBps,
+			strategy: tunables.strategy,
+			slippageBps: tunables.slippageBps,
 		};
 		printPreview(
 			plan,
@@ -285,6 +309,113 @@ function handleBotCommand(command: BotCommand) {
 				);
 				return;
 			}
+			if (command.kind === "config_show") {
+				const tunables = yield* getTunables();
+				const entries = EDITABLE_KEYS.map((key) => ({
+					key,
+					display: EDITABLE_REGISTRY[key].getDisplay(tunables),
+					describe: EDITABLE_REGISTRY[key].describe(),
+					sideEffect: EDITABLE_REGISTRY[key].sideEffect,
+				}));
+				yield* replyText(
+					formatConfigShow(entries),
+					configMenuKeyboard(EDITABLE_KEYS),
+				);
+				return;
+			}
+			if (command.kind === "config_pick") {
+				const entry = EDITABLE_REGISTRY[command.key];
+				const tunables = yield* getTunables();
+				// Pick never applies anything, not even for POOL_ADDRESS: it only
+				// renders the value keyboard. POOL_ADDRESS has no presets, so its
+				// keyboard is back-only and its customHint carries the type-in
+				// instructions. Never put addresses in buttons.
+				yield* replyText(
+					formatConfigPick({
+						key: command.key,
+						display: entry.getDisplay(tunables),
+						describe: entry.describe(),
+						sideEffect: entry.sideEffect,
+						customHint: entry.customHint,
+					}),
+					configValueKeyboard(command.key, entry.presets),
+				);
+				return;
+			}
+			if (command.kind === "config_set") {
+				const normalized = normalizeEditableKey(command.key);
+				if (normalized === null) {
+					const valid = EDITABLE_KEYS.map((key) => ({
+						key,
+						describe: EDITABLE_REGISTRY[key].describe(),
+					}));
+					yield* replyText(formatConfigUnknownKey(command.key, valid));
+					return;
+				}
+				const entry = EDITABLE_REGISTRY[normalized];
+				const parsedExit = yield* Effect.exit(entry.parse(command.value));
+				if (parsedExit._tag === "Failure") {
+					yield* replyText(
+						formatConfigBadValue(normalized, command.value, entry.describe()),
+					);
+					return;
+				}
+				const parsed = parsedExit.value;
+				if (entry.needsConfirm && !command.confirmed) {
+					const tunables = yield* getTunables();
+					const fullValue = entry.formatParsed(parsed);
+					yield* replyText(
+						formatConfigPreview(
+							normalized,
+							shortAddr(entry.getDisplay(tunables)),
+							shortAddr(fullValue),
+							fullValue,
+						),
+					);
+					return;
+				}
+				const tunables = yield* getTunables();
+				const oldDisplay = entry.getDisplay(tunables);
+				const updated = yield* entry.apply(tunables, command.value);
+				const ref = yield* RuntimeTunables;
+				yield* Ref.set(ref, updated);
+				const newDisplay = entry.getDisplay(updated);
+				if (entry.needsConfirm) {
+					// Pool switch: persist for restarts, then invalidate any
+					// queued live rebalance for the old pool so it can never
+					// fire on the new pool. Persist is best-effort and never
+					// logs secrets; the in-memory switch already took effect.
+					yield* Effect.catch(
+						persistEnvKey(entry.key, String(parsed), ".env"),
+						(persistError) =>
+							Effect.sync(() =>
+								console.warn(
+									`[${nowStamp()}] Config persist failed: ${persistError.message}`,
+								),
+							),
+					);
+					clearPendingLiveConfirm();
+					yield* replyText(
+						formatConfigUpdated(
+							normalized,
+							shortAddr(oldDisplay),
+							shortAddr(newDisplay),
+							entry.sideEffect,
+							"Send <code>/status</code> to verify the position in the new pool. Never auto-rebalances on switch.",
+						),
+					);
+					return;
+				}
+				yield* replyText(
+					formatConfigUpdated(
+						normalized,
+						shortAddr(oldDisplay),
+						shortAddr(newDisplay),
+						entry.sideEffect,
+					),
+				);
+				return;
+			}
 			if (
 				command.kind === "rebalance" &&
 				shouldDeferLiveConfirm(command, config.dryRun)
@@ -295,72 +426,77 @@ function handleBotCommand(command: BotCommand) {
 				);
 				return;
 			}
+			const tunables = yield* getTunables();
 			const state = yield* loadPositionState({
-				poolAddress: config.poolAddress,
+				poolAddress: tunables.poolAddress,
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
 				yield* replyText(formatStatusReply(snapshot));
 				return;
 			}
-			if (
-				!shouldRebalance(
-					snapshot.activeBinId,
+			if (command.kind === "rebalance") {
+				if (
+					!shouldRebalance(
+						snapshot.activeBinId,
+						snapshot.lowerBinId,
+						snapshot.upperBinId,
+					)
+				) {
+					yield* replyText(formatInRangeReply(snapshot));
+					return;
+				}
+				const halfWidth = originalHalfRange(
 					snapshot.lowerBinId,
 					snapshot.upperBinId,
-				)
-			) {
-				yield* replyText(formatInRangeReply(snapshot));
-				return;
-			}
-			const halfWidth = originalHalfRange(
-				snapshot.lowerBinId,
-				snapshot.upperBinId,
-			);
-			const plan = yield* planZapRebalance({
-				poolAddress: config.poolAddress,
-				positionAddress: snapshot.position,
-				strategy: config.strategy,
-				slippageBps: config.slippageBps,
-				halfWidth,
-				jupiterApiKey: config.jupiterApiKey,
-			});
-			const preview = formatPreviewReply({
-				header: "🔍 <b>Rebalance preview</b>",
-				pool: snapshot.pool,
-				position: snapshot.position,
-				activeBinId: snapshot.activeBinId,
-				lowerBinId: snapshot.lowerBinId,
-				upperBinId: snapshot.upperBinId,
-				newLowerBinId: snapshot.activeBinId + plan.minDeltaId,
-				newUpperBinId: snapshot.activeBinId + plan.maxDeltaId,
-				amountXDisplay: formatTokenAmount(
-					plan.estimate.result.postSwapX,
-					snapshot.tokenXDecimals,
-					snapshot.tokenXSymbol,
-				),
-				amountYDisplay: formatTokenAmount(
-					plan.estimate.result.postSwapY,
-					snapshot.tokenYDecimals,
-					snapshot.tokenYSymbol,
-				),
-				slippageBps: plan.slippageBps,
-				dryRun: config.dryRun,
-				swapsDisplay: describeZapSwap(plan.estimate),
-			});
-			if (!command.confirmed) {
-				yield* replyText(
-					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
-					confirmInlineKeyboard(config.dryRun),
 				);
+				const plan = yield* planZapRebalance({
+					poolAddress: tunables.poolAddress,
+					positionAddress: snapshot.position,
+					strategy: tunables.strategy,
+					slippageBps: tunables.slippageBps,
+					halfWidth,
+					jupiterApiKey: config.jupiterApiKey,
+				});
+				const preview = formatPreviewReply({
+					header: "🔍 <b>Rebalance preview</b>",
+					pool: snapshot.pool,
+					position: snapshot.position,
+					activeBinId: snapshot.activeBinId,
+					lowerBinId: snapshot.lowerBinId,
+					upperBinId: snapshot.upperBinId,
+					newLowerBinId: snapshot.activeBinId + plan.minDeltaId,
+					newUpperBinId: snapshot.activeBinId + plan.maxDeltaId,
+					amountXDisplay: formatTokenAmount(
+						plan.estimate.result.postSwapX,
+						snapshot.tokenXDecimals,
+						snapshot.tokenXSymbol,
+					),
+					amountYDisplay: formatTokenAmount(
+						plan.estimate.result.postSwapY,
+						snapshot.tokenYDecimals,
+						snapshot.tokenYSymbol,
+					),
+					slippageBps: plan.slippageBps,
+					dryRun: config.dryRun,
+					swapsDisplay: describeZapSwap(plan.estimate),
+				});
+				if (!command.confirmed) {
+					yield* replyText(
+						`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
+						confirmInlineKeyboard(config.dryRun),
+					);
+					return;
+				}
+				yield* replyText(
+					`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).`,
+				);
+				// Live confirms defer earlier via shouldDeferLiveConfirm, so reaching
+				// here means preview-only. Never execute live in the fast loop.
 				return;
 			}
-			yield* replyText(
-				`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).`,
-			);
-			// Live confirms defer earlier via shouldDeferLiveConfirm, so reaching
-			// here means preview-only. Never execute live in the fast loop.
-			return;
+			const _exhaustive: never = command;
+			return _exhaustive;
 		}),
 		(error) =>
 			Effect.sync(() => {
@@ -416,8 +552,9 @@ function drainPendingConfirm() {
 				yield* handleBotCommand(pending);
 				return;
 			}
+			const tunables = yield* getTunables();
 			const state = yield* loadPositionState({
-				poolAddress: config.poolAddress,
+				poolAddress: tunables.poolAddress,
 			});
 			const snapshot = state.snapshot;
 			if (
@@ -435,23 +572,23 @@ function drainPendingConfirm() {
 				snapshot.upperBinId,
 			);
 			const plan = yield* planZapRebalance({
-				poolAddress: config.poolAddress,
+				poolAddress: tunables.poolAddress,
 				positionAddress: snapshot.position,
-				strategy: config.strategy,
-				slippageBps: config.slippageBps,
+				strategy: tunables.strategy,
+				slippageBps: tunables.slippageBps,
 				halfWidth,
 				jupiterApiKey: config.jupiterApiKey,
 			});
 			const compound: CompoundFeesInput = {
-				enabled: config.compoundFees,
+				enabled: tunables.compoundFees,
 				dlmm: state.dlmm,
 				positionAddress: snapshot.position,
 				feeX: snapshot.feeX,
 				feeY: snapshot.feeY,
 				minBinId: snapshot.activeBinId - halfWidth,
 				maxBinId: snapshot.activeBinId + halfWidth,
-				strategy: config.strategy,
-				slippageBps: config.slippageBps,
+				strategy: tunables.strategy,
+				slippageBps: tunables.slippageBps,
 			};
 			printPreview(
 				plan,
@@ -484,7 +621,8 @@ function drainPendingConfirm() {
 }
 
 // Fast command loop on its own TELEGRAM_POLL_INTERVAL_MS timer for no-delay
-// replies. Shares the existing stopped flag with the main loop: SIGINT/SIGTERM
+// replies. Interval is read live per loop so /config edits apply promptly.
+// Shares the existing stopped flag with the main loop: SIGINT/SIGTERM
 // sets stopped and wakes the main sleep; the fast loop then exits promptly,
 // worst case within one telegram interval. No second shutdown path.
 async function telegramFastLoop() {
@@ -497,8 +635,14 @@ async function telegramFastLoop() {
 		if (stopped) {
 			break;
 		}
+		const liveTelegramMs = await Effect.runPromise(
+			Effect.provide(getTunables(), appLive),
+		).then(
+			(tunables) => tunables.telegramPollIntervalMs,
+			() => boot.telegramPollIntervalMs,
+		);
 		await new Promise<void>((resolve) => {
-			setTimeout(resolve, telegramPollIntervalMs);
+			setTimeout(resolve, liveTelegramMs);
 		});
 	}
 }
@@ -520,9 +664,15 @@ while (!stopped) {
 	if (stopped) {
 		break;
 	}
+	const livePollMs = await Effect.runPromise(
+		Effect.provide(getTunables(), appLive),
+	).then(
+		(tunables) => tunables.pollIntervalMs,
+		() => boot.pollIntervalMs,
+	);
 	await new Promise<void>((resolve) => {
 		wake = resolve;
-		setTimeout(resolve, pollIntervalMs);
+		setTimeout(resolve, livePollMs);
 	});
 	wake = undefined;
 }

@@ -12,6 +12,7 @@ import {
 	solscanAccountUrl,
 	solscanTxUrl,
 } from "../utils.ts";
+import type { EditableKey } from "./commands.ts";
 
 export class TelegramError extends Data.TaggedError("TelegramError")<{
 	message: string;
@@ -50,6 +51,7 @@ export const TELEGRAM_MAIN_MENU = {
 	keyboard: [
 		[{ text: "📊 Status" }, { text: "👁 Preview" }],
 		[{ text: "✅ Confirm" }, { text: "❓ Help" }],
+		[{ text: "⚙️ Config" }],
 	],
 	resize_keyboard: true,
 	is_persistent: true,
@@ -59,6 +61,10 @@ export const TELEGRAM_BOT_COMMANDS = [
 	{ command: "status", description: "show position snapshot (read-only)" },
 	{ command: "help", description: "show help" },
 	{ command: "rebalance", description: "preview rebalance (no transactions)" },
+	{
+		command: "config",
+		description: "show editable config (/config set KEY VALUE)",
+	},
 ] as const;
 
 // Inline confirm button attached to live-mode previews. Tapping it emits a
@@ -72,6 +78,34 @@ export function confirmInlineKeyboard(dryRun: boolean) {
 			[{ text: "✅ Confirm live", callback_data: "rebalance_confirm" }],
 		],
 	} as const;
+}
+
+// Tap-to-edit menu: one pick button per editable key. Tapping emits
+// "config_pick:<KEY>", parsed as config_pick. No values in buttons.
+export function configMenuKeyboard(keys: ReadonlyArray<EditableKey>) {
+	return {
+		inline_keyboard: keys.map((key) => [
+			{ text: key, callback_data: `config_pick:${key}` },
+		]),
+	};
+}
+
+// Value keyboard for one key: one set button per preset plus a back button.
+// Tapping a preset emits "config_set:<KEY>:<VALUE>"; back emits "config_show".
+// POOL_ADDRESS has no presets, so its keyboard is back-only: tapping it never
+// applies anything, the pick reply carries the type-in instructions instead.
+export function configValueKeyboard(
+	key: EditableKey,
+	presets: ReadonlyArray<string>,
+) {
+	return {
+		inline_keyboard: [
+			...presets.map((value) => [
+				{ text: value, callback_data: `config_set:${key}:${value}` },
+			]),
+			[{ text: "⬅️ Config", callback_data: "config_show" }],
+		],
+	};
 }
 // Escape dynamic text for Telegram HTML parse_mode.
 // ">" is escaped too so arrows like "->" never read as markup.
@@ -167,6 +201,108 @@ export function formatStatusReply(snapshot: PositionSnapshot): string {
 
 export function formatInRangeReply(snapshot: PositionSnapshot): string {
 	return `✅ <b>In range</b> — no rebalance needed.\n${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))} within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`;
+}
+
+export interface ConfigShowEntry {
+	key: string;
+	display: string;
+	describe: string;
+	sideEffect: string;
+}
+
+// Show all editable values. Entries come from the commands.ts registry so
+// bounds never drift; this formatter only lays out escaped HTML.
+export function formatConfigShow(
+	entries: ReadonlyArray<ConfigShowEntry>,
+): string {
+	const rows = entries
+		.map(
+			(entry) =>
+				`<code>${escapeHtml(entry.key)}</code> = <code>${escapeHtml(entry.display)}</code>\n<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>`,
+		)
+		.join("\n\n");
+	return (
+		`⚙️ <b>Editable config</b>\n${rows}\n\n` +
+		`Tap a key below to edit, or set with <code>/config set KEY VALUE</code> (POOL_ADDRESS needs a <code>confirm</code> suffix).\n` +
+		`<i>DRY_RUN, RPC_URL, PRIVATE_KEY, TELEGRAM_* and JUPITER_API_KEY stay startup-only.</i>`
+	);
+}
+
+export interface ConfigPickEntry extends ConfigShowEntry {
+	customHint?: string;
+}
+
+// Single-key view for a config_pick tap. Keeps the free-type fallback line
+// so keyboards never strand the owner without a typed path. POOL_ADDRESS
+// type-in instructions arrive via customHint from the registry; this
+// formatter never puts addresses in buttons.
+export function formatConfigPick(entry: ConfigPickEntry): string {
+	const custom = entry.customHint
+		? `\n<i>${escapeHtml(entry.customHint)}</i>`
+		: "";
+	return (
+		`⚙️ <b>Config ${escapeHtml(entry.key)}</b>\n` +
+		`<code>${escapeHtml(entry.key)}</code> = <code>${escapeHtml(entry.display)}</code>\n` +
+		`<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>\n\n` +
+		`Tap a value below, or set with <code>/config set ${escapeHtml(entry.key)} VALUE</code>.${custom}`
+	);
+}
+
+// Pool-switch preview: no state change. Displays are pre-shortened by the
+// caller; fullValue is the exact value to resend (never truncated).
+export function formatConfigPreview(
+	key: string,
+	oldDisplay: string,
+	newDisplay: string,
+	fullValue: string,
+): string {
+	return (
+		`⚠️ <b>Config preview</b> — no change applied.\n` +
+		`<code>${escapeHtml(key)}</code>: <code>${escapeHtml(oldDisplay)}</code> → <code>${escapeHtml(newDisplay)}</code>\n` +
+		`Send again with a <code>confirm</code> suffix to apply:\n<code>/config set ${escapeHtml(key)} ${escapeHtml(fullValue)} confirm</code>`
+	);
+}
+
+export function formatConfigUpdated(
+	key: string,
+	oldDisplay: string,
+	newDisplay: string,
+	sideEffect: string,
+	hint?: string,
+): string {
+	const extra = hint ? `\n${hint}` : "";
+	return (
+		`✅ <b>Config updated</b>\n` +
+		`<code>${escapeHtml(key)}</code>: <code>${escapeHtml(oldDisplay)}</code> → <code>${escapeHtml(newDisplay)}</code>\n` +
+		`<i>${escapeHtml(sideEffect)}</i>${extra}`
+	);
+}
+
+export function formatConfigUnknownKey(
+	rawKey: string,
+	valid: ReadonlyArray<{ key: string; describe: string }>,
+): string {
+	const rows = valid
+		.map(
+			(entry) =>
+				`<code>${escapeHtml(entry.key)}</code> — ${escapeHtml(entry.describe)}`,
+		)
+		.join("\n");
+	return (
+		`❌ <b>Unknown config key</b> <code>${escapeHtml(rawKey || "(empty)")}</code>\n` +
+		`Valid keys:\n${rows}\n\nNo state changed.`
+	);
+}
+
+export function formatConfigBadValue(
+	key: string,
+	raw: string,
+	describe: string,
+): string {
+	return (
+		`❌ <b>Invalid value</b> for <code>${escapeHtml(key)}</code>: <code>${escapeHtml(raw || "(empty)")}</code>\n` +
+		`Expected: ${escapeHtml(describe)}\n\nNo state changed.`
+	);
 }
 
 const telegramFormatters: {

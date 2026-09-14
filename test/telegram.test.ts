@@ -1,27 +1,52 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { Effect } from "effect";
-import { ConfigError, type EnvSource, loadConfig } from "../src/config.ts";
+import { Effect, Ref } from "effect";
+import {
+	ConfigError,
+	type EnvSource,
+	loadConfig,
+	tunablesFromConfig,
+} from "../src/config.ts";
+import { persistEnvKey, RuntimeTunables } from "../src/services.ts";
 import {
 	clearPendingLiveConfirm,
+	EDITABLE_KEYS,
+	EDITABLE_REGISTRY,
+	type EditableKey,
 	fetchTelegramUpdates,
 	hasPendingLiveConfirm,
+	isEditableKey,
 	nextUpdatesOffset,
+	normalizeEditableKey,
 	parseBotCommand,
+	parseConfigMenuAction,
 	queuePendingLiveConfirm,
 	shouldDeferLiveConfirm,
 	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
 import {
+	configMenuKeyboard,
+	configValueKeyboard,
 	directionLine,
 	escapeHtml,
+	formatConfigBadValue,
+	formatConfigPick,
+	formatConfigPreview,
+	formatConfigShow,
+	formatConfigUnknownKey,
+	formatConfigUpdated,
 	formatTelegramMessage,
 	notifyTelegramEvent,
 	notifyTelegramText,
 	sendTelegramEvent,
 	sendTelegramText,
+	TELEGRAM_BOT_COMMANDS,
+	TELEGRAM_MAIN_MENU,
 	TelegramError,
 	type TelegramFetch,
 } from "../src/telegram/notify.ts";
@@ -640,5 +665,785 @@ describe("renderRangeBar", () => {
 		expect(bar).toContain("*");
 		expect(bar).not.toContain("=");
 		expect(bar).not.toContain("+");
+	});
+});
+
+describe("parseBotCommand /config", () => {
+	const allowed = "987654";
+
+	test("parses /config as show", () => {
+		expect(
+			parseBotCommand(makeUpdate(201, 987654, "/config"), allowed),
+		).toEqual({
+			kind: "config_show",
+			chatId: allowed,
+			updateId: 201,
+		});
+	});
+
+	test("parses /config set KEY VALUE", () => {
+		expect(
+			parseBotCommand(
+				makeUpdate(202, 987654, "/config set SLIPPAGE_BPS 50"),
+				allowed,
+			),
+		).toEqual({
+			kind: "config_set",
+			chatId: allowed,
+			updateId: 202,
+			key: "SLIPPAGE_BPS",
+			value: "50",
+			confirmed: false,
+		});
+	});
+
+	test("parses pool switch with confirm suffix", () => {
+		const pool = Keypair.generate().publicKey.toBase58();
+		expect(
+			parseBotCommand(
+				makeUpdate(203, 987654, `/config set POOL_ADDRESS ${pool} confirm`),
+				allowed,
+			),
+		).toEqual({
+			kind: "config_set",
+			chatId: allowed,
+			updateId: 203,
+			key: "POOL_ADDRESS",
+			value: pool,
+			confirmed: true,
+		});
+		expect(
+			parseBotCommand(
+				makeUpdate(204, 987654, `/config set POOL_ADDRESS ${pool}`),
+				allowed,
+			),
+		).toMatchObject({ kind: "config_set", confirmed: false });
+	});
+
+	test("strips @BotName suffix on /config", () => {
+		const parsed = parseBotCommand(
+			makeUpdate(205, 987654, "/config@MyBot"),
+			allowed,
+		);
+		expect(parsed?.kind).toBe("config_show");
+	});
+
+	test("rejects wrong chat id for /config", () => {
+		expect(
+			parseBotCommand(makeUpdate(206, 111111, "/config"), allowed),
+		).toBeNull();
+		expect(
+			parseBotCommand(
+				makeUpdate(207, 111111, "/config set SLIPPAGE_BPS 50"),
+				allowed,
+			),
+		).toBeNull();
+	});
+
+	test("menu Config label parses back to show", () => {
+		expect(
+			parseBotCommand(makeUpdate(208, 987654, "⚙️ Config"), allowed)?.kind,
+		).toBe("config_show");
+		expect(
+			parseBotCommand(makeUpdate(209, 987654, "config"), allowed)?.kind,
+		).toBe("config_show");
+	});
+
+	test("malformed /config surfaces as unknown (help path)", () => {
+		expect(
+			parseBotCommand(makeUpdate(210, 987654, "/config frobnicate"), allowed)
+				?.kind,
+		).toBe("unknown");
+	});
+});
+
+describe("editable registry", () => {
+	test("covers exactly the seven editable keys", () => {
+		const expected: EditableKey[] = [
+			"COMPOUND_FEES",
+			"POLL_INTERVAL_MS",
+			"POOL_ADDRESS",
+			"PRIORITY_LEVEL",
+			"SLIPPAGE_BPS",
+			"STRATEGY",
+			"TELEGRAM_POLL_INTERVAL_MS",
+		];
+		expect([...EDITABLE_KEYS].sort()).toEqual([...expected].sort());
+	});
+
+	test("startup-only keys are never editable", () => {
+		for (const key of [
+			"DRY_RUN",
+			"RPC_URL",
+			"PRIVATE_KEY",
+			"TELEGRAM_BOT_TOKEN",
+			"TELEGRAM_CHAT_ID",
+			"JUPITER_API_KEY",
+		]) {
+			expect(isEditableKey(key)).toBe(false);
+			expect(normalizeEditableKey(key)).toBeNull();
+		}
+	});
+
+	test("key lookup is case-insensitive", () => {
+		expect(isEditableKey("slippage_bps")).toBe(true);
+		expect(normalizeEditableKey("pool_address")).toBe("POOL_ADDRESS");
+		expect(isEditableKey("FROBNICATE")).toBe(false);
+	});
+
+	test("needsConfirm is true only for POOL_ADDRESS", () => {
+		for (const key of EDITABLE_KEYS) {
+			expect(EDITABLE_REGISTRY[key].needsConfirm).toBe(key === "POOL_ADDRESS");
+		}
+	});
+
+	test("rejects out-of-range ints with ConfigError", async () => {
+		for (const [key, bad] of [
+			["SLIPPAGE_BPS", "10001"] as const,
+			["SLIPPAGE_BPS", "-1"] as const,
+			["POLL_INTERVAL_MS", "4999"] as const,
+			["POLL_INTERVAL_MS", "3600001"] as const,
+			["TELEGRAM_POLL_INTERVAL_MS", "999"] as const,
+			["TELEGRAM_POLL_INTERVAL_MS", "60001"] as const,
+		]) {
+			const error = await Effect.runPromise(
+				Effect.flip(EDITABLE_REGISTRY[key].parse(bad)),
+			);
+			expect(error).toBeInstanceOf(ConfigError);
+		}
+	});
+
+	test("accepts int boundaries", async () => {
+		expect(
+			await Effect.runPromise(EDITABLE_REGISTRY.SLIPPAGE_BPS.parse("0")),
+		).toBe(0);
+		expect(
+			await Effect.runPromise(EDITABLE_REGISTRY.SLIPPAGE_BPS.parse("10000")),
+		).toBe(10000);
+		expect(
+			await Effect.runPromise(EDITABLE_REGISTRY.POLL_INTERVAL_MS.parse("5000")),
+		).toBe(5000);
+		expect(
+			await Effect.runPromise(
+				EDITABLE_REGISTRY.TELEGRAM_POLL_INTERVAL_MS.parse("60000"),
+			),
+		).toBe(60000);
+	});
+
+	test("rejects bad pubkey, accepts valid base58", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(EDITABLE_REGISTRY.POOL_ADDRESS.parse("not-an-address")),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+		const pool = Keypair.generate().publicKey.toBase58();
+		expect(
+			await Effect.runPromise(EDITABLE_REGISTRY.POOL_ADDRESS.parse(pool)),
+		).toBe(pool);
+	});
+
+	test("accepts strategy aliases", async () => {
+		for (const [raw, expected] of [
+			["Spot", "Spot"],
+			["spot", "Spot"],
+			["CURVE", "Curve"],
+			["BidAsk", "BidAsk"],
+			["bidask", "BidAsk"],
+			["bid-ask", "BidAsk"],
+			["bid_ask", "BidAsk"],
+		] as const) {
+			expect(
+				await Effect.runPromise(EDITABLE_REGISTRY.STRATEGY.parse(raw)),
+			).toBe(expected);
+		}
+		const error = await Effect.runPromise(
+			Effect.flip(EDITABLE_REGISTRY.STRATEGY.parse("sideways")),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("accepts priority levels case-insensitively", async () => {
+		expect(
+			await Effect.runPromise(EDITABLE_REGISTRY.PRIORITY_LEVEL.parse("auto")),
+		).toBe("Auto");
+		expect(
+			await Effect.runPromise(
+				EDITABLE_REGISTRY.PRIORITY_LEVEL.parse("veryhigh"),
+			),
+		).toBe("VeryHigh");
+		const error = await Effect.runPromise(
+			Effect.flip(EDITABLE_REGISTRY.PRIORITY_LEVEL.parse("Ultra")),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("apply returns new tunables without mutating the original", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		const before = tunablesFromConfig(config);
+		const after = await Effect.runPromise(
+			EDITABLE_REGISTRY.SLIPPAGE_BPS.apply(before, "200"),
+		);
+		expect(after.slippageBps).toBe(200);
+		expect(before.slippageBps).toBe(config.slippageBps);
+		const pool = Keypair.generate().publicKey.toBase58();
+		const switched = await Effect.runPromise(
+			EDITABLE_REGISTRY.POOL_ADDRESS.apply(before, pool),
+		);
+		expect(switched.poolAddress).toBe(pool);
+		expect(before.poolAddress).toBe(config.poolAddress);
+	});
+
+	test("pool apply clears a queued live confirm", async () => {
+		clearPendingLiveConfirm();
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		const before = tunablesFromConfig(config);
+		queuePendingLiveConfirm({
+			kind: "rebalance",
+			chatId: "987654",
+			updateId: 999,
+			confirmed: true,
+		});
+		expect(hasPendingLiveConfirm()).toBe(true);
+		const pool = Keypair.generate().publicKey.toBase58();
+		const ref = await Effect.runPromise(Ref.make(before));
+		const updated = await Effect.runPromise(
+			EDITABLE_REGISTRY.POOL_ADDRESS.apply(
+				await Effect.runPromise(Ref.get(ref)),
+				pool,
+			),
+		);
+		await Effect.runPromise(Ref.set(ref, updated));
+		clearPendingLiveConfirm();
+		expect(hasPendingLiveConfirm()).toBe(false);
+		expect((await Effect.runPromise(Ref.get(ref))).poolAddress).toBe(pool);
+		clearPendingLiveConfirm();
+	});
+});
+
+describe("config formatters", () => {
+	test("show lists keys with bounds, escaped", () => {
+		const text = formatConfigShow([
+			{
+				key: "SLIPPAGE_BPS",
+				display: "50 bps",
+				describe: "integer in [0, 10000] bps",
+				sideEffect: "applies to the next zap estimate",
+			},
+		]);
+		expect(text).toContain("SLIPPAGE_BPS");
+		expect(text).toContain("50 bps");
+		expect(text).toContain("DRY_RUN");
+		const hostile = formatConfigShow([
+			{
+				key: "<evil>",
+				display: "<b>&",
+				describe: "<script>",
+				sideEffect: "&>",
+			},
+		]);
+		expect(hostile).not.toContain("<evil>");
+		expect(hostile).toContain("&lt;evil&gt;");
+	});
+
+	test("preview shows old->new with confirm hint", () => {
+		const text = formatConfigPreview(
+			"POOL_ADDRESS",
+			"Ab12..KlMn",
+			"Cd34..OpQr",
+			"Cd34Ef56Gh78Ij90KlMnOpQrStUvWxYz123456789012",
+		);
+		expect(text).toContain("Ab12..KlMn");
+		expect(text).toContain("Cd34..OpQr");
+		expect(text).toContain("Cd34Ef56Gh78Ij90KlMnOpQrStUvWxYz123456789012");
+		expect(text).toContain("confirm");
+	});
+
+	test("updated includes side effect and optional hint", () => {
+		const text = formatConfigUpdated(
+			"POOL_ADDRESS",
+			"Ab12..KlMn",
+			"Cd34..OpQr",
+			"switches pool",
+			"Send /status to verify",
+		);
+		expect(text).toContain("Config updated");
+		expect(text).toContain("/status");
+	});
+
+	test("unknown key lists valid keys, bad value shows bounds", () => {
+		const unknown = formatConfigUnknownKey("DRY_RUN", [
+			{ key: "SLIPPAGE_BPS", describe: "integer in [0, 10000] bps" },
+		]);
+		expect(unknown).toContain("DRY_RUN");
+		expect(unknown).toContain("SLIPPAGE_BPS");
+		const bad = formatConfigBadValue(
+			"SLIPPAGE_BPS",
+			"99999",
+			"integer in [0, 10000] bps",
+		);
+		expect(bad).toContain("99999");
+		expect(bad).toContain("No state changed");
+	});
+});
+
+describe("config UX wiring", () => {
+	test("help, menu and slash commands stay in sync", async () => {
+		const { TELEGRAM_HELP_TEXT } = await import("../src/telegram/commands.ts");
+		expect(TELEGRAM_HELP_TEXT).toContain("/config");
+		expect(TELEGRAM_HELP_TEXT).toContain("POOL_ADDRESS");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
+		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
+		expect(labels).toContain("⚙️ Config");
+		expect(labels.length).toBe(5);
+	});
+});
+
+describe("persistEnvKey atomic write (offline, temp files)", () => {
+	test("replaces POOL_ADDRESS, preserves other lines incl. secrets", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "dlmm-env-"));
+		try {
+			const envPath = join(dir, ".env");
+			const poolA = Keypair.generate().publicKey.toBase58();
+			const poolB = Keypair.generate().publicKey.toBase58();
+			const secret = bs58.encode(Keypair.generate().secretKey);
+			const original = `# comment\nRPC_URL=https://example.com\nPOOL_ADDRESS=${poolA}\nPRIVATE_KEY=${secret}\n`;
+			await writeFile(envPath, original, "utf8");
+			await Effect.runPromise(persistEnvKey("POOL_ADDRESS", poolB, envPath));
+			const next = await readFile(envPath, "utf8");
+			expect(next).toContain(`POOL_ADDRESS=${poolB}`);
+			expect(next).not.toContain(poolA);
+			expect(next).toContain(`PRIVATE_KEY=${secret}`);
+			expect(next).toContain("# comment");
+			expect(next).toContain("RPC_URL=https://example.com");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("appends when missing and creates when absent", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "dlmm-env-"));
+		try {
+			const pool = Keypair.generate().publicKey.toBase58();
+			const missing = join(dir, "sub", ".env");
+			await Effect.runPromise(
+				persistEnvKey("POOL_ADDRESS", pool, missing),
+			).then(
+				() => expect.unreachable(),
+				(error) => expect(error).toBeInstanceOf(ConfigError),
+			);
+			const fresh = join(dir, ".env");
+			await Effect.runPromise(persistEnvKey("POOL_ADDRESS", pool, fresh));
+			expect(await readFile(fresh, "utf8")).toBe(`POOL_ADDRESS=${pool}\n`);
+			await Effect.runPromise(persistEnvKey("POOL_ADDRESS", pool, fresh));
+			expect(await readFile(fresh, "utf8")).toBe(`POOL_ADDRESS=${pool}\n`);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("RuntimeTunables layer initializes from loadConfig", async () => {
+		const { makeAppLive } = await import("../src/services.ts");
+		const pool = Keypair.generate().publicKey.toBase58();
+		const result = await Effect.runPromise(
+			Effect.provide(
+				Effect.gen(function* () {
+					const ref = yield* RuntimeTunables;
+					return yield* Ref.get(ref);
+				}),
+				makeAppLive(makeEnv({ POOL_ADDRESS: pool, SLIPPAGE_BPS: "200" })),
+			),
+		);
+		expect(result.poolAddress).toBe(pool);
+		expect(result.slippageBps).toBe(200);
+	});
+});
+
+function makeCallback(
+	updateId: number,
+	chatId: number | string,
+	data: unknown,
+	callbackId = "cb1",
+) {
+	return {
+		update_id: updateId,
+		callback_query: {
+			id: callbackId,
+			data,
+			message: {
+				message_id: 1,
+				chat: { id: chatId, type: "private" },
+			},
+		},
+	};
+}
+
+describe("config menu callbacks", () => {
+	const allowed = "987654";
+
+	test("parses config/config_show to show", () => {
+		for (const data of ["config", "config_show"]) {
+			expect(parseBotCommand(makeCallback(301, 987654, data), allowed)).toEqual(
+				{
+					kind: "config_show",
+					chatId: allowed,
+					updateId: 301,
+					callbackId: "cb1",
+				},
+			);
+		}
+		expect(parseConfigMenuAction("config")).toEqual({ kind: "config_show" });
+		expect(parseConfigMenuAction("config_show")).toEqual({
+			kind: "config_show",
+		});
+	});
+
+	test("parses pick callbacks", () => {
+		expect(
+			parseBotCommand(
+				makeCallback(302, 987654, "config_pick:STRATEGY"),
+				allowed,
+			),
+		).toEqual({
+			kind: "config_pick",
+			chatId: allowed,
+			updateId: 302,
+			key: "STRATEGY",
+			callbackId: "cb1",
+		});
+		expect(parseConfigMenuAction("config_pick:POOL_ADDRESS")).toEqual({
+			kind: "config_pick",
+			key: "POOL_ADDRESS",
+		});
+	});
+
+	test("parses set callbacks", () => {
+		expect(
+			parseBotCommand(
+				makeCallback(303, 987654, "config_set:SLIPPAGE_BPS:50"),
+				allowed,
+			),
+		).toEqual({
+			kind: "config_set",
+			chatId: allowed,
+			updateId: 303,
+			key: "SLIPPAGE_BPS",
+			value: "50",
+			confirmed: false,
+			callbackId: "cb1",
+		});
+		expect(parseConfigMenuAction("config_set:STRATEGY:Spot")).toEqual({
+			kind: "config_set",
+			key: "STRATEGY",
+			value: "Spot",
+			confirmed: false,
+		});
+	});
+
+	test("parses set callbacks with confirm suffix", () => {
+		const pool = Keypair.generate().publicKey.toBase58();
+		expect(
+			parseBotCommand(
+				makeCallback(304, 987654, `config_set:POOL_ADDRESS:${pool}:confirm`),
+				allowed,
+			),
+		).toEqual({
+			kind: "config_set",
+			chatId: allowed,
+			updateId: 304,
+			key: "POOL_ADDRESS",
+			value: pool,
+			confirmed: true,
+			callbackId: "cb1",
+		});
+		expect(
+			parseConfigMenuAction(`config_set:POOL_ADDRESS:${pool}:confirm`),
+		).toEqual({
+			kind: "config_set",
+			key: "POOL_ADDRESS",
+			value: pool,
+			confirmed: true,
+		});
+		expect(parseConfigMenuAction("config_set:STRATEGY:Spot:confirm")).toEqual({
+			kind: "config_set",
+			key: "STRATEGY",
+			value: "Spot",
+			confirmed: true,
+		});
+	});
+
+	test("rejects wrong chatId for menu callbacks", () => {
+		expect(
+			parseBotCommand(makeCallback(305, 111111, "config_show"), allowed),
+		).toBeNull();
+		expect(
+			parseBotCommand(
+				makeCallback(306, 111111, "config_pick:STRATEGY"),
+				allowed,
+			),
+		).toBeNull();
+		expect(
+			parseBotCommand(
+				makeCallback(307, 111111, "config_set:SLIPPAGE_BPS:50"),
+				allowed,
+			),
+		).toBeNull();
+	});
+
+	test("unknown key maps to unknown without state change", () => {
+		for (const data of [
+			"config_pick:FROBNICATE",
+			"config_set:FROBNICATE:50",
+			"config_pick:DRY_RUN",
+			"config_set:RPC_URL:https://example.com",
+		]) {
+			const parsed = parseBotCommand(makeCallback(308, 987654, data), allowed);
+			expect(parsed?.kind).toBe("unknown");
+			expect(parseConfigMenuAction(data)).toBeNull();
+		}
+	});
+
+	test("malformed shapes map to unknown", () => {
+		for (const data of [
+			"config_pick:",
+			"config_pick:STRATEGY:extra",
+			"config_set:SLIPPAGE_BPS:",
+			"config_set:SLIPPAGE_BPS:50:maybe",
+			"config_set:SLIPPAGE_BPS:50:confirm:extra",
+			"config_set:SLIPPAGE_BPS:with space",
+			"config_frobnicate",
+		]) {
+			const parsed = parseBotCommand(makeCallback(309, 987654, data), allowed);
+			expect(parsed?.kind).toBe("unknown");
+			expect(parseConfigMenuAction(data)).toBeNull();
+		}
+	});
+});
+
+describe("config menu keyboards", () => {
+	test("menu keyboard covers every editable key with pick callbacks", () => {
+		const keyboard = configMenuKeyboard(EDITABLE_KEYS);
+		expect(keyboard.inline_keyboard.length).toBe(EDITABLE_KEYS.length);
+		const seen = new Set<string>();
+		for (const row of keyboard.inline_keyboard) {
+			expect(row.length).toBe(1);
+			const button = row[0];
+			expect(button).toBeDefined();
+			if (!button) {
+				continue;
+			}
+			seen.add(button.text);
+			const action = parseConfigMenuAction(button.callback_data);
+			expect(action?.kind).toBe("config_pick");
+			if (action?.kind === "config_pick") {
+				expect(button.callback_data).toBe(`config_pick:${action.key}`);
+				expect(EDITABLE_KEYS).toContain(action.key);
+			}
+		}
+		expect([...seen].sort()).toEqual([...EDITABLE_KEYS].sort());
+	});
+
+	test("value keyboards match registry presets plus back, round-trip to set", () => {
+		for (const key of EDITABLE_KEYS) {
+			const presets = EDITABLE_REGISTRY[key].presets;
+			const keyboard = configValueKeyboard(key, presets);
+			expect(keyboard.inline_keyboard.length).toBe(presets.length + 1);
+			const presetRows = keyboard.inline_keyboard.slice(0, presets.length);
+			presetRows.forEach((row, index) => {
+				const button = row[0];
+				expect(button).toBeDefined();
+				if (!button) {
+					return;
+				}
+				const expected = presets[index] ?? "";
+				expect(button.text).toBe(expected);
+				expect(button.callback_data).toBe(`config_set:${key}:${expected}`);
+				expect(parseConfigMenuAction(button.callback_data)).toEqual({
+					kind: "config_set",
+					key,
+					value: expected,
+					confirmed: false,
+				});
+			});
+			const back = keyboard.inline_keyboard[presets.length]?.[0];
+			expect(back?.callback_data).toBe("config_show");
+			expect(parseConfigMenuAction(back?.callback_data ?? "")).toEqual({
+				kind: "config_show",
+			});
+		}
+	});
+
+	test("registry holds the exact preset lists, POOL_ADDRESS back-only", () => {
+		expect([...EDITABLE_REGISTRY.STRATEGY.presets]).toEqual([
+			"Spot",
+			"Curve",
+			"BidAsk",
+		]);
+		expect([...EDITABLE_REGISTRY.COMPOUND_FEES.presets]).toEqual([
+			"true",
+			"false",
+		]);
+		expect([...EDITABLE_REGISTRY.PRIORITY_LEVEL.presets]).toEqual([
+			"Auto",
+			"Min",
+			"Low",
+			"Medium",
+			"High",
+			"VeryHigh",
+			"UnsafeMax",
+		]);
+		expect([...EDITABLE_REGISTRY.SLIPPAGE_BPS.presets]).toEqual([
+			"10",
+			"25",
+			"50",
+			"100",
+		]);
+		expect([...EDITABLE_REGISTRY.POLL_INTERVAL_MS.presets]).toEqual([
+			"15000",
+			"30000",
+			"60000",
+			"300000",
+		]);
+		expect([...EDITABLE_REGISTRY.TELEGRAM_POLL_INTERVAL_MS.presets]).toEqual([
+			"2000",
+			"3000",
+			"5000",
+		]);
+		expect([...EDITABLE_REGISTRY.POOL_ADDRESS.presets]).toEqual([]);
+		const poolKeyboard = configValueKeyboard(
+			"POOL_ADDRESS",
+			EDITABLE_REGISTRY.POOL_ADDRESS.presets,
+		);
+		expect(poolKeyboard.inline_keyboard.length).toBe(1);
+		expect(poolKeyboard.inline_keyboard[0]?.[0]?.callback_data).toBe(
+			"config_show",
+		);
+		for (const row of poolKeyboard.inline_keyboard) {
+			for (const button of row) {
+				expect(button.callback_data).not.toContain("config_set");
+			}
+		}
+	});
+
+	test("every preset is URL-safe and passes its registry validator", async () => {
+		for (const key of EDITABLE_KEYS) {
+			for (const preset of EDITABLE_REGISTRY[key].presets) {
+				expect(preset).not.toContain(" ");
+				expect(preset).not.toContain(":");
+				await Effect.runPromise(EDITABLE_REGISTRY[key].parse(preset));
+			}
+		}
+	});
+});
+
+describe("config menu safety", () => {
+	test("bad callback value parses but fails validation without state change", async () => {
+		const parsed = parseBotCommand(
+			makeCallback(310, 987654, "config_set:SLIPPAGE_BPS:99999"),
+			"987654",
+		);
+		expect(parsed).toMatchObject({
+			kind: "config_set",
+			key: "SLIPPAGE_BPS",
+			value: "99999",
+		});
+		const error = await Effect.runPromise(
+			Effect.flip(EDITABLE_REGISTRY.SLIPPAGE_BPS.parse("99999")),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		const before = tunablesFromConfig(config);
+		const ref = await Effect.runPromise(Ref.make(before));
+		await Effect.runPromise(
+			EDITABLE_REGISTRY.SLIPPAGE_BPS.apply(
+				await Effect.runPromise(Ref.get(ref)),
+				"99999",
+			),
+		).then(
+			() => expect.unreachable(),
+			(applyError) => expect(applyError).toBeInstanceOf(ConfigError),
+		);
+		expect((await Effect.runPromise(Ref.get(ref))).slippageBps).toBe(
+			before.slippageBps,
+		);
+	});
+
+	test("POOL_ADDRESS pick never applies, replies with type-in instructions", () => {
+		const picked = parseBotCommand(
+			makeCallback(311, 987654, "config_pick:POOL_ADDRESS"),
+			"987654",
+		);
+		expect(picked?.kind).toBe("config_pick");
+		expect(picked).not.toMatchObject({ kind: "config_set" });
+		const entry = EDITABLE_REGISTRY.POOL_ADDRESS;
+		expect(entry.presets.length).toBe(0);
+		expect(entry.customHint).toContain("/config set POOL_ADDRESS");
+		const text = formatConfigPick({
+			key: "POOL_ADDRESS",
+			display: "Ab12..KlMn",
+			describe: entry.describe(),
+			sideEffect: entry.sideEffect,
+			customHint: entry.customHint,
+		});
+		expect(text).toContain("/config set POOL_ADDRESS");
+		expect(text).toContain("confirm");
+		expect(text).not.toContain("PRIVATE_KEY");
+	});
+
+	test("startup-only keys stay absent from registry and menus", () => {
+		const keyboard = configMenuKeyboard(EDITABLE_KEYS);
+		const callbacks = keyboard.inline_keyboard
+			.flat()
+			.map((button) => button.callback_data);
+		for (const key of [
+			"DRY_RUN",
+			"RPC_URL",
+			"PRIVATE_KEY",
+			"TELEGRAM_BOT_TOKEN",
+			"TELEGRAM_CHAT_ID",
+			"JUPITER_API_KEY",
+		]) {
+			expect(isEditableKey(key)).toBe(false);
+			for (const callback of callbacks) {
+				expect(callback).not.toContain(key);
+			}
+		}
+	});
+});
+
+describe("config menu help sync", () => {
+	test("show mentions tap plus free-type fallback, pick keeps the hint", async () => {
+		const { TELEGRAM_HELP_TEXT } = await import("../src/telegram/commands.ts");
+		expect(TELEGRAM_HELP_TEXT).toContain("/config");
+		expect(TELEGRAM_HELP_TEXT).toContain("POOL_ADDRESS");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
+		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
+		expect(labels).toContain("⚙️ Config");
+		const text = formatConfigShow([
+			{
+				key: "SLIPPAGE_BPS",
+				display: "50 bps",
+				describe: "integer in [0, 10000] bps",
+				sideEffect: "applies to the next zap estimate",
+			},
+		]);
+		expect(text).toContain("Tap a key below");
+		expect(text).toContain("/config set KEY VALUE");
+		const pick = formatConfigPick({
+			key: "SLIPPAGE_BPS",
+			display: "50 bps",
+			describe: "integer in [0, 10000] bps",
+			sideEffect: "applies to the next zap estimate",
+			customHint: EDITABLE_REGISTRY.SLIPPAGE_BPS.customHint,
+		});
+		expect(pick).toContain("/config set SLIPPAGE_BPS VALUE");
+		expect(pick).toContain("Custom:");
+		const hostile = formatConfigPick({
+			key: "SLIPPAGE_BPS",
+			display: "<b>&",
+			describe: "<script>",
+			sideEffect: "&>",
+			customHint: "<evil>",
+		});
+		expect(hostile).not.toContain("<evil>");
+		expect(hostile).toContain("&lt;evil&gt;");
 	});
 });

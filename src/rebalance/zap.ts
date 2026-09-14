@@ -19,8 +19,13 @@ import {
 	type TransactionInstruction,
 } from "@solana/web3.js";
 import BN from "bn.js";
-import { Data, Effect } from "effect";
-import { AppConfig, AppSigner, SolanaConnection } from "../services.ts";
+import { Data, Effect, Ref } from "effect";
+import {
+	type AppConfig,
+	AppSigner,
+	RuntimeTunables,
+	SolanaConnection,
+} from "../services.ts";
 import { formatSig, nowStamp } from "../utils.ts";
 import { sendManualTransaction } from "./send.ts";
 import { type StrategyKind, toStrategyType } from "./types.ts";
@@ -146,14 +151,19 @@ export const planZapRebalance = Effect.fn("planZapRebalance")(function* (
 function sendZapTx(
 	tx: Transaction,
 	label: string,
-): Effect.Effect<string, ZapError, SolanaConnection | AppSigner | AppConfig> {
+): Effect.Effect<
+	string,
+	ZapError,
+	SolanaConnection | AppSigner | AppConfig | RuntimeTunables
+> {
 	return Effect.gen(function* () {
-		const config = yield* AppConfig;
+		const tunablesRef = yield* RuntimeTunables;
+		const tunables = yield* Ref.get(tunablesRef);
 		return yield* Effect.mapError(
 			sendManualTransaction({
 				tx,
 				label,
-				priorityLevel: config.priorityLevel,
+				priorityLevel: tunables.priorityLevel,
 			}),
 			(error) => toZapError(error),
 		);
@@ -162,7 +172,11 @@ function sendZapTx(
 
 function ensureUserTokenAccounts(
 	lbPair: PublicKey,
-): Effect.Effect<void, ZapError, SolanaConnection | AppSigner | AppConfig> {
+): Effect.Effect<
+	void,
+	ZapError,
+	SolanaConnection | AppSigner | AppConfig | RuntimeTunables
+> {
 	return Effect.gen(function* () {
 		const connection = yield* SolanaConnection;
 		const signer = yield* AppSigner;
@@ -248,7 +262,7 @@ function executeCompoundTopUp(
 ): Effect.Effect<
 	string | null,
 	ZapError,
-	SolanaConnection | AppSigner | AppConfig
+	SolanaConnection | AppSigner | AppConfig | RuntimeTunables
 > {
 	return Effect.gen(function* () {
 		if (!input.enabled) {
@@ -305,7 +319,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 ): Effect.fn.Return<
 	{ signature: string },
 	ZapError,
-	SolanaConnection | AppSigner | AppConfig
+	SolanaConnection | AppSigner | AppConfig | RuntimeTunables
 > {
 	const signer = yield* AppSigner;
 	const { zap, estimate } = input.plan;

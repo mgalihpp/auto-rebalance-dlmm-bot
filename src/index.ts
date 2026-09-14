@@ -1,5 +1,6 @@
 import { config as loadDotenv } from "dotenv";
 import { Effect, Ref } from "effect";
+import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
@@ -12,6 +13,7 @@ import {
 import {
 	AppConfig,
 	makeAppLive,
+	makeAppLiveWithTunables,
 	persistEnvKey,
 	RuntimeTunables,
 } from "./services.ts";
@@ -134,7 +136,7 @@ function requestShutdown() {
 process.on("SIGINT", requestShutdown);
 process.on("SIGTERM", requestShutdown);
 
-const appLive = makeAppLive(process.env);
+const bootLive = makeAppLive(process.env);
 
 const boot = await Effect.runPromise(
 	Effect.provide(
@@ -145,14 +147,22 @@ const boot = await Effect.runPromise(
 				telegramPollIntervalMs: config.telegramPollIntervalMs,
 				pool: config.poolAddress,
 				dryRun: config.dryRun,
+				initialTunables: tunablesFromConfig(config),
 			};
 		}),
-		appLive,
+		bootLive,
 	),
 ).catch((error): never => {
 	console.error(`[${nowStamp()}] Rebalance failed:`, error);
 	process.exit(1);
 });
+
+// ONE shared Ref for the whole process: every main-loop iteration and every
+// telegram poll provides this same appLive, so a Ref.set in one run is
+// visible in all later runs. Rebuilding tunablesLive per run would hand each
+// run a fresh Ref from startup config and silently drop edits.
+const tunablesRef = Effect.runSync(Ref.make(boot.initialTunables));
+const appLive = makeAppLiveWithTunables(process.env, tunablesRef);
 
 // Single snapshot read per iteration. Telegram is the only writer.
 function getTunables() {
@@ -380,20 +390,20 @@ function handleBotCommand(command: BotCommand) {
 				const ref = yield* RuntimeTunables;
 				yield* Ref.set(ref, updated);
 				const newDisplay = entry.getDisplay(updated);
-				if (entry.needsConfirm) {
-					// Pool switch: persist for restarts, then invalidate any
-					// queued live rebalance for the old pool so it can never
-					// fire on the new pool. Persist is best-effort and never
-					// logs secrets; the in-memory switch already took effect.
-					yield* Effect.catch(
-						persistEnvKey(entry.key, String(parsed), ".env"),
-						(persistError) =>
-							Effect.sync(() =>
-								console.warn(
-									`[${nowStamp()}] Config persist failed: ${persistError.message}`,
-								),
+				// Every editable key persists for restarts. Best-effort and never
+				// logs secrets; the in-memory switch already took effect.
+				yield* Effect.catch(
+					persistEnvKey(entry.key, String(parsed), ".env"),
+					(persistError) =>
+						Effect.sync(() =>
+							console.warn(
+								`[${nowStamp()}] Config persist failed: ${persistError.message}`,
 							),
-					);
+						),
+				);
+				if (entry.needsConfirm) {
+					// Pool switch only: invalidate any queued live rebalance for
+					// the old pool so it can never fire on the new pool.
 					clearPendingLiveConfirm();
 					yield* replyText(
 						formatConfigUpdated(

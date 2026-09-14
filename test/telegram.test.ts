@@ -1040,6 +1040,33 @@ describe("persistEnvKey atomic write (offline, temp files)", () => {
 		}
 	});
 
+	test("persists non-pool key (STRATEGY) via registry apply", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "dlmm-env-"));
+		try {
+			const envPath = join(dir, ".env");
+			await writeFile(envPath, "STRATEGY=Spot\n", "utf8");
+			const config = await Effect.runPromise(
+				loadConfig(makeEnv({ STRATEGY: "Spot" })),
+			);
+			const before = tunablesFromConfig(config);
+			const after = await Effect.runPromise(
+				EDITABLE_REGISTRY.STRATEGY.apply(before, "Curve"),
+			);
+			expect(after.strategy).toBe("Curve");
+			const parsed = await Effect.runPromise(
+				EDITABLE_REGISTRY.STRATEGY.parse("Curve"),
+			);
+			await Effect.runPromise(
+				persistEnvKey("STRATEGY", String(parsed), envPath),
+			);
+			const next = await readFile(envPath, "utf8");
+			expect(next).toContain("STRATEGY=Curve");
+			expect(next).not.toContain("STRATEGY=Spot");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("RuntimeTunables layer initializes from loadConfig", async () => {
 		const { makeAppLive } = await import("../src/services.ts");
 		const pool = Keypair.generate().publicKey.toBase58();

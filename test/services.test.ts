@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
-import { Effect } from "effect";
-import type { EnvSource } from "../src/config.ts";
+import { Effect, Ref } from "effect";
+import {
+	type EnvSource,
+	loadConfig,
+	tunablesFromConfig,
+} from "../src/config.ts";
 import {
 	AppConfig,
 	AppSigner,
 	makeAppLive,
+	makeAppLiveWithTunables,
+	RuntimeTunables,
 	SolanaConnection,
 } from "../src/services.ts";
 
@@ -59,5 +65,32 @@ describe("app live layer", () => {
 				),
 			),
 		).rejects.toThrow();
+	});
+
+	test("shared tunables ref persists across runs", async () => {
+		const env = makeEnv({ STRATEGY: "Spot" });
+		const config = await Effect.runPromise(loadConfig(env));
+		const ref = await Effect.runPromise(Ref.make(tunablesFromConfig(config)));
+		const shared = makeAppLiveWithTunables(env, ref);
+		await Effect.runPromise(
+			Effect.provide(
+				Effect.gen(function* () {
+					const tunables = yield* RuntimeTunables;
+					const current = yield* Ref.get(tunables);
+					yield* Ref.set(tunables, { ...current, strategy: "Curve" as const });
+				}),
+				shared,
+			),
+		);
+		const after = await Effect.runPromise(
+			Effect.provide(
+				Effect.gen(function* () {
+					const tunables = yield* RuntimeTunables;
+					return yield* Ref.get(tunables);
+				}),
+				shared,
+			),
+		);
+		expect(after.strategy).toBe("Curve");
 	});
 });

@@ -58,11 +58,30 @@ const tunablesLive = Layer.effect(
 	}),
 );
 
+export function makeTunablesLive(ref: Ref.Ref<Tunables>) {
+	return Layer.succeed(RuntimeTunables, ref);
+}
+
 export function makeAppLive(env: EnvSource) {
 	const configLive = makeConfigLive(env);
 	const depsLive = Layer.merge(
 		Layer.merge(connectionLive, signerLive),
 		tunablesLive,
+	);
+	return Layer.merge(configLive, Layer.provide(depsLive, configLive));
+}
+
+// Shared-Ref construction for the long-lived poll loop: ONE Ref instance is
+// injected so every Effect.runPromise(Effect.provide(..., appLive)) in the
+// main loop and the telegram fast loop reads and writes the same tunables.
+export function makeAppLiveWithTunables(
+	env: EnvSource,
+	ref: Ref.Ref<Tunables>,
+) {
+	const configLive = makeConfigLive(env);
+	const depsLive = Layer.merge(
+		Layer.merge(connectionLive, signerLive),
+		makeTunablesLive(ref),
 	);
 	return Layer.merge(configLive, Layer.provide(depsLive, configLive));
 }

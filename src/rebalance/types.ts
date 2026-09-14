@@ -18,6 +18,10 @@ export interface PositionSnapshot {
 	claimedFeeY: BN;
 	tokenXMint: string;
 	tokenYMint: string;
+	tokenXDecimals: number;
+	tokenYDecimals: number;
+	tokenXSymbol: string;
+	tokenYSymbol: string;
 }
 
 export function toStrategyType(kind: StrategyKind): StrategyType {

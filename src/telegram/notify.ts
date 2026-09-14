@@ -1,6 +1,17 @@
 import { Data, Effect } from "effect";
 import type { TelegramConfig } from "../config.ts";
-import { formatBinRange, nowStamp, solscanTxUrl } from "../utils.ts";
+import type { PositionSnapshot } from "../rebalance/types.ts";
+import {
+	formatBinRange,
+	formatTokenAmount,
+	meteoraPoolUrl,
+	nowStamp,
+	rangeDirection,
+	renderRangeBar,
+	shortAddr,
+	solscanAccountUrl,
+	solscanTxUrl,
+} from "../utils.ts";
 
 export class TelegramError extends Data.TaggedError("TelegramError")<{
 	message: string;
@@ -9,7 +20,11 @@ export class TelegramError extends Data.TaggedError("TelegramError")<{
 // Outgoing bot events. inRange is intentionally absent: the poll loop stays
 // quiet when the position is healthy to avoid spamming the owner.
 export type TelegramEvent =
-	| { kind: "startup"; pool: string; dryRun: boolean }
+	| {
+			kind: "startup";
+			pool: string;
+			dryRun: boolean;
+	  }
 	| { kind: "shutdown" }
 	| {
 			kind: "rebalanceNeeded";
@@ -20,10 +35,11 @@ export type TelegramEvent =
 			upperBinId: number;
 			newLowerBinId: number;
 			newUpperBinId: number;
-			amountX: string;
-			amountY: string;
+			amountXDisplay: string;
+			amountYDisplay: string;
 			slippageBps: number;
 			dryRun: boolean;
+			swapsDisplay?: string;
 	  }
 	| { kind: "rebalanced"; pool: string; position: string; signature: string }
 	| { kind: "failed"; message: string };
@@ -68,20 +84,119 @@ export function escapeHtml(text: string): string {
 
 // Single formatter table over the union. Add new event kinds here, not with
 // scattered conditionals at the call sites.
+export function directionLine(
+	active: number,
+	lower: number,
+	upper: number,
+): string {
+	const direction = rangeDirection(active, lower, upper);
+	if (direction === "above") {
+		return `Active ${active} is ABOVE range by ${active - upper} bins`;
+	}
+	if (direction === "below") {
+		return `Active ${active} is BELOW range by ${lower - active} bins`;
+	}
+	return `Active ${active} is inside range`;
+}
+
+export interface PreviewReplyInput {
+	pool: string;
+	position: string;
+	activeBinId: number;
+	lowerBinId: number;
+	upperBinId: number;
+	newLowerBinId: number;
+	newUpperBinId: number;
+	amountXDisplay: string;
+	amountYDisplay: string;
+	slippageBps: number;
+	dryRun: boolean;
+	swapsDisplay?: string;
+	header?: string;
+}
+
+export function formatPreviewReply(input: PreviewReplyInput): string {
+	const header = input.header ?? "⚠️ <b>Rebalance needed</b>";
+	const bar = renderRangeBar(
+		input.lowerBinId,
+		input.upperBinId,
+		input.newLowerBinId,
+		input.newUpperBinId,
+		input.activeBinId,
+	);
+	const swaps = input.swapsDisplay
+		? `\nSwaps: <code>${escapeHtml(input.swapsDisplay)}</code>`
+		: "";
+	const mode = input.dryRun
+		? "Dry run — no transactions sent."
+		: "<b>LIVE</b> — executing.";
+	return (
+		`${header}\n${escapeHtml(directionLine(input.activeBinId, input.lowerBinId, input.upperBinId))}\n` +
+		`<pre>${escapeHtml(bar)}</pre>\n` +
+		`<i>= old range · + new range · ^ active</i>\n` +
+		`Range: <code>${escapeHtml(formatBinRange(input.lowerBinId, input.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(input.newLowerBinId, input.newUpperBinId))}</code>\n` +
+		`Balances: <code>${escapeHtml(input.amountXDisplay)}</code> | <code>${escapeHtml(input.amountYDisplay)}</code>\n` +
+		`Slippage: <code>${input.slippageBps} bps</code>${swaps}\n` +
+		`Pool: <a href="${escapeHtml(meteoraPoolUrl(input.pool))}"><code>${escapeHtml(shortAddr(input.pool))}</code></a> ` +
+		`Position: <a href="${escapeHtml(solscanAccountUrl(input.position))}"><code>${escapeHtml(shortAddr(input.position))}</code></a>\n` +
+		mode
+	);
+}
+
+export function formatStatusReply(snapshot: PositionSnapshot): string {
+	const bar = renderRangeBar(
+		snapshot.lowerBinId,
+		snapshot.upperBinId,
+		snapshot.lowerBinId,
+		snapshot.upperBinId,
+		snapshot.activeBinId,
+	);
+	const pair = `${snapshot.tokenXSymbol}/${snapshot.tokenYSymbol}`;
+	return (
+		`📊 <b>Position snapshot</b> <code>${escapeHtml(pair)}</code>\n` +
+		`${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))}\n` +
+		`<pre>${escapeHtml(bar)}</pre>\n` +
+		`<i>* range · ^ active</i>\n` +
+		`Range: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>\n` +
+		`Balances: <code>${escapeHtml(formatTokenAmount(snapshot.amountX, snapshot.tokenXDecimals, snapshot.tokenXSymbol))}</code> | ` +
+		`<code>${escapeHtml(formatTokenAmount(snapshot.amountY, snapshot.tokenYDecimals, snapshot.tokenYSymbol))}</code>\n` +
+		`Pool: <a href="${escapeHtml(meteoraPoolUrl(snapshot.pool))}"><code>${escapeHtml(shortAddr(snapshot.pool))}</code></a> ` +
+		`Position: <a href="${escapeHtml(solscanAccountUrl(snapshot.position))}"><code>${escapeHtml(shortAddr(snapshot.position))}</code></a>`
+	);
+}
+
+export function formatInRangeReply(snapshot: PositionSnapshot): string {
+	return `✅ <b>In range</b> — no rebalance needed.\n${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))} within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`;
+}
+
 const telegramFormatters: {
 	[K in TelegramEvent["kind"]]: (
 		event: Extract<TelegramEvent, { kind: K }>,
 	) => string;
 } = {
-	startup: (event) =>
-		`<b>DLMM bot started</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nMode: ${event.dryRun ? "dry run (preview only)" : "<b>LIVE</b> (will send transactions)"}`,
-	shutdown: () => "<b>DLMM bot stopped.</b>",
+	startup: (event) => {
+		return `<b>🤖 DLMM bot started</b>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a>\nMode: ${event.dryRun ? "dry run (preview only)" : "<b>LIVE</b> (will send transactions)"}`;
+	},
+	shutdown: () => "🛑 <b>DLMM bot stopped.</b>",
 	rebalanceNeeded: (event) =>
-		`<b>Rebalance needed</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nPosition: <code>${escapeHtml(event.position)}</code>\nActive: <code>${event.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(event.lowerBinId, event.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(event.newLowerBinId, event.newUpperBinId))}</code>\nBalances: X=<code>${escapeHtml(event.amountX)}</code> Y=<code>${escapeHtml(event.amountY)}</code>\nSlippage: <code>${event.slippageBps} bps</code>\n${event.dryRun ? "Dry run — no transactions sent." : "<b>LIVE</b> — executing."}`,
+		formatPreviewReply({
+			pool: event.pool,
+			position: event.position,
+			activeBinId: event.activeBinId,
+			lowerBinId: event.lowerBinId,
+			upperBinId: event.upperBinId,
+			newLowerBinId: event.newLowerBinId,
+			newUpperBinId: event.newUpperBinId,
+			amountXDisplay: event.amountXDisplay,
+			amountYDisplay: event.amountYDisplay,
+			slippageBps: event.slippageBps,
+			dryRun: event.dryRun,
+			swapsDisplay: event.swapsDisplay,
+		}),
 	rebalanced: (event) =>
-		`<b>Rebalanced</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nPosition: <code>${escapeHtml(event.position)}</code>\nTx: <a href="${solscanTxUrl(event.signature)}"><code>${escapeHtml(event.signature)}</code></a>`,
+		`✅ <b>Rebalanced</b>\nTx: <a href="${escapeHtml(solscanTxUrl(event.signature))}"><code>${escapeHtml(shortAddr(event.signature))}</code></a>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a> <a href="${escapeHtml(meteoraPoolUrl(event.pool))}">Meteora</a> | <a href="${escapeHtml(solscanTxUrl(event.signature))}">Solscan</a>\nPosition: <a href="${escapeHtml(solscanAccountUrl(event.position))}"><code>${escapeHtml(shortAddr(event.position))}</code></a>`,
 	failed: (event) =>
-		`<b>Rebalance failed</b>\n<code>${escapeHtml(event.message.slice(0, 1000))}</code>`,
+		`❌ <b>Rebalance failed</b>\n<code>${escapeHtml(event.message.slice(0, 1000))}</code>`,
 };
 
 export function formatTelegramMessage(event: TelegramEvent): string {

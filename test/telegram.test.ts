@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Keypair } from "@solana/web3.js";
+import BN from "bn.js";
 import bs58 from "bs58";
 import { Effect } from "effect";
 import { ConfigError, type EnvSource, loadConfig } from "../src/config.ts";
@@ -14,6 +15,7 @@ import {
 	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
 import {
+	directionLine,
 	escapeHtml,
 	formatTelegramMessage,
 	notifyTelegramEvent,
@@ -23,6 +25,12 @@ import {
 	TelegramError,
 	type TelegramFetch,
 } from "../src/telegram/notify.ts";
+import {
+	formatTokenAmount,
+	rangeDirection,
+	renderRangeBar,
+	shortAddr,
+} from "../src/utils.ts";
 
 function makeEnv(overrides?: EnvSource): EnvSource {
 	return {
@@ -94,7 +102,7 @@ describe("formatTelegramMessage", () => {
 			pool: "Pool111",
 			dryRun: true,
 		});
-		expect(text).toContain("Pool111");
+		expect(text).toContain("Po");
 		expect(text).toContain("dry run");
 	});
 
@@ -112,19 +120,22 @@ describe("formatTelegramMessage", () => {
 			upperBinId: 1034,
 			newLowerBinId: 1066,
 			newUpperBinId: 1134,
-			amountX: "902690000",
-			amountY: "756000000",
+			amountXDisplay: "0.90269 X",
+			amountYDisplay: "0.756 Y",
 			slippageBps: 50,
 			dryRun: true,
 		});
-		expect(text).toContain("Pos222");
+		expect(text).toContain("ABOVE");
 		expect(text).toContain("966 to 1034");
 		expect(text).toContain("1066 to 1134");
-		expect(text).toContain("902690000");
+		expect(text).toContain("0.90269 X");
+		expect(text).toContain("0.756 Y");
+		expect(text).toContain("<pre>");
+		expect(text).toContain("^");
 		expect(text).toContain("Dry run");
 	});
 
-	test("rebalanced includes signature link", () => {
+	test("rebalanced includes short signature link", () => {
 		const text = formatTelegramMessage({
 			kind: "rebalanced",
 			pool: "Pool111",
@@ -133,6 +144,7 @@ describe("formatTelegramMessage", () => {
 		});
 		expect(text).toContain("Sig333");
 		expect(text).toContain("https://solscan.io/tx/Sig333");
+		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
 	});
 
 	test("failed includes the error message", () => {
@@ -339,15 +351,14 @@ describe("telegram HTML structure", () => {
 			upperBinId: 1034,
 			newLowerBinId: 1066,
 			newUpperBinId: 1134,
-			amountX: "902690000",
-			amountY: "756000000",
+			amountXDisplay: "0.90269 X",
+			amountYDisplay: "0.756 Y",
 			slippageBps: 50,
 			dryRun: true,
 		});
 		expect(text).toContain("<b>Rebalance needed</b>");
-		expect(text).toContain("<code>Pos222</code>");
-		expect(text).toContain("<code>1100</code>");
-		expect(text).toContain("<code>902690000</code>");
+		expect(text).toContain("1100");
+		expect(text).toContain("<pre>");
 	});
 
 	test("rebalanced links the signature via solscan <a href>", () => {
@@ -537,5 +548,97 @@ describe("fast-loop disabled no-op", () => {
 		const config = await Effect.runPromise(loadConfig(makeEnv()));
 		expect(config.telegram).toBeUndefined();
 		expect(config.telegramPollIntervalMs).toBe(3000);
+	});
+});
+
+describe("shortAddr", () => {
+	test("shortens long addresses to first4..last4", () => {
+		expect(shortAddr("Ab12Cd34Ef56Gh78Ij90KlMn")).toBe("Ab12..KlMn");
+	});
+
+	test("passes through short strings", () => {
+		expect(shortAddr("Pool111")).toBe("Pool111");
+		expect(shortAddr("12345678901")).toBe("12345678901");
+	});
+});
+
+describe("rangeDirection", () => {
+	test("above when active exceeds upper", () => {
+		expect(rangeDirection(1100, 966, 1034)).toBe("above");
+	});
+
+	test("below when active under lower", () => {
+		expect(rangeDirection(900, 966, 1034)).toBe("below");
+	});
+
+	test("inside on the boundaries", () => {
+		expect(rangeDirection(1000, 966, 1034)).toBe("inside");
+		expect(rangeDirection(966, 966, 1034)).toBe("inside");
+		expect(rangeDirection(1034, 966, 1034)).toBe("inside");
+	});
+});
+
+describe("directionLine", () => {
+	test("above reports the bin gap", () => {
+		expect(directionLine(1100, 966, 1034)).toContain("ABOVE");
+		expect(directionLine(1100, 966, 1034)).toContain("66 bins");
+	});
+
+	test("below reports the bin gap", () => {
+		expect(directionLine(900, 966, 1034)).toContain("BELOW");
+	});
+
+	test("inside stays quiet", () => {
+		expect(directionLine(1000, 966, 1034)).toContain("inside");
+	});
+});
+
+describe("formatTokenAmount", () => {
+	test("formats 9-decimal amounts", () => {
+		expect(formatTokenAmount(new BN("1500000000"), 9, "SOL")).toBe("1.5 SOL");
+	});
+
+	test("formats 6-decimal amounts", () => {
+		expect(formatTokenAmount(new BN("756000000"), 6, "USDC")).toBe("756 USDC");
+	});
+
+	test("falls back to raw string when decimals undefined", () => {
+		expect(formatTokenAmount(new BN("902690000"), undefined, "X")).toBe(
+			"902,690,000 X",
+		);
+	});
+
+	test("groups thousands on normalized amounts", () => {
+		expect(formatTokenAmount(new BN("12500000000"), 6, "MEME")).toBe(
+			"12,500 MEME",
+		);
+	});
+});
+
+describe("renderRangeBar", () => {
+	test("above: marks old, new, overlap and the active caret", () => {
+		const bar = renderRangeBar(966, 1034, 1066, 1134, 1100);
+		expect(bar).toContain("=");
+		expect(bar).toContain("+");
+		expect(bar).toContain("^");
+		const rows = bar.split("\n");
+		expect(rows.length).toBe(3);
+		expect(rows[1]).toContain("^");
+		expect(rows[0]).toMatch(/^[|=+* ]+$/);
+	});
+
+	test("below: caret sits left of the old range", () => {
+		const bar = renderRangeBar(966, 1034, 866, 934, 900);
+		const rows = bar.split("\n");
+		expect(rows[1]?.indexOf("^") ?? -1).toBeLessThan(10);
+		expect(bar).toContain("=");
+		expect(bar).toContain("+");
+	});
+
+	test("inside: identical ranges collapse to overlap marks", () => {
+		const bar = renderRangeBar(966, 1034, 966, 1034, 1000);
+		expect(bar).toContain("*");
+		expect(bar).not.toContain("=");
+		expect(bar).not.toContain("+");
 	});
 });

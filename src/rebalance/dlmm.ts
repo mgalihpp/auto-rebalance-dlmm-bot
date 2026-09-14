@@ -3,6 +3,7 @@ import { PublicKey } from "@solana/web3.js";
 import BN from "bn.js";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
+import { fetchPoolMeta } from "./tokenMeta.ts";
 import type { PositionSnapshot } from "./types.ts";
 
 export class DlmmError extends Data.TaggedError("DlmmError")<{
@@ -101,6 +102,15 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 	);
 
 	const data = position.positionData;
+	const tokenXMint = dlmm.lbPair.tokenXMint.toBase58();
+	const tokenYMint = dlmm.lbPair.tokenYMint.toBase58();
+	// Decimals come from the SDK mint accounts (fetched by DLMM.create, zero
+	// extra calls). Symbols come from the official Meteora DLMM Data API.
+	const poolMeta = yield* fetchPoolMeta(
+		input.poolAddress,
+		tokenXMint,
+		tokenYMint,
+	);
 	const snapshot: PositionSnapshot = {
 		pool: dlmm.pubkey.toBase58(),
 		position: position.publicKey.toBase58(),
@@ -114,8 +124,12 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 		feeY: data.feeY,
 		claimedFeeX: data.totalClaimedFeeXAmount,
 		claimedFeeY: data.totalClaimedFeeYAmount,
-		tokenXMint: dlmm.lbPair.tokenXMint.toBase58(),
-		tokenYMint: dlmm.lbPair.tokenYMint.toBase58(),
+		tokenXMint,
+		tokenYMint,
+		tokenXDecimals: poolMeta.tokenX.decimals ?? dlmm.tokenX.mint.decimals,
+		tokenYDecimals: poolMeta.tokenY.decimals ?? dlmm.tokenY.mint.decimals,
+		tokenXSymbol: poolMeta.tokenX.symbol,
+		tokenYSymbol: poolMeta.tokenY.symbol,
 	};
 	return { dlmm, position, snapshot };
 });

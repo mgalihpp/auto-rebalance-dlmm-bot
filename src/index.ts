@@ -24,12 +24,21 @@ import {
 	answerTelegramCallback,
 	confirmInlineKeyboard,
 	escapeHtml,
+	formatInRangeReply,
+	formatPreviewReply,
+	formatStatusReply,
 	notifyTelegramEvent,
 	notifyTelegramText,
 	setTelegramMenuCommands,
 	type TelegramEvent,
 } from "./telegram/notify.ts";
-import { formatBinRange, formatBn, formatSig, nowStamp } from "./utils.ts";
+import {
+	formatBinRange,
+	formatBn,
+	formatSig,
+	formatTokenAmount,
+	nowStamp,
+} from "./utils.ts";
 
 loadDotenv();
 
@@ -143,7 +152,11 @@ await Effect.runPromise(
 					),
 				);
 			}
-			yield* notify({ kind: "startup", pool: boot.pool, dryRun: boot.dryRun });
+			yield* notify({
+				kind: "startup",
+				pool: boot.pool,
+				dryRun: boot.dryRun,
+			});
 		}),
 		appLive,
 	),
@@ -213,10 +226,19 @@ function runIteration() {
 			upperBinId: snapshot.upperBinId,
 			newLowerBinId: snapshot.activeBinId + plan.minDeltaId,
 			newUpperBinId: snapshot.activeBinId + plan.maxDeltaId,
-			amountX: formatBn(plan.estimate.result.postSwapX),
-			amountY: formatBn(plan.estimate.result.postSwapY),
+			amountXDisplay: formatTokenAmount(
+				plan.estimate.result.postSwapX,
+				snapshot.tokenXDecimals,
+				snapshot.tokenXSymbol,
+			),
+			amountYDisplay: formatTokenAmount(
+				plan.estimate.result.postSwapY,
+				snapshot.tokenYDecimals,
+				snapshot.tokenYSymbol,
+			),
 			slippageBps: plan.slippageBps,
 			dryRun: config.dryRun,
+			swapsDisplay: describeZapSwap(plan.estimate),
 		});
 
 		if (config.dryRun) {
@@ -278,9 +300,7 @@ function handleBotCommand(command: BotCommand) {
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
-				yield* replyText(
-					`<b>Position snapshot</b>\nPool: <code>${escapeHtml(snapshot.pool)}</code>\nPosition: <code>${escapeHtml(snapshot.position)}</code>\nActive: <code>${snapshot.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>\nBalances: X=<code>${escapeHtml(formatBn(snapshot.amountX))}</code> Y=<code>${escapeHtml(formatBn(snapshot.amountY))}</code>`,
-				);
+				yield* replyText(formatStatusReply(snapshot));
 				return;
 			}
 			if (
@@ -290,9 +310,7 @@ function handleBotCommand(command: BotCommand) {
 					snapshot.upperBinId,
 				)
 			) {
-				yield* replyText(
-					`<b>In range</b> — no rebalance needed.\nActive: <code>${snapshot.activeBinId}</code> within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`,
-				);
+				yield* replyText(formatInRangeReply(snapshot));
 				return;
 			}
 			const halfWidth = originalHalfRange(
@@ -307,7 +325,29 @@ function handleBotCommand(command: BotCommand) {
 				halfWidth,
 				jupiterApiKey: config.jupiterApiKey,
 			});
-			const preview = `<b>Rebalance preview</b>\nPool: <code>${escapeHtml(snapshot.pool)}</code>\nPosition: <code>${escapeHtml(snapshot.position)}</code>\nActive: <code>${snapshot.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId))}</code>\nBalances: X=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapX))}</code> Y=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapY))}</code>\nSlippage: <code>${plan.slippageBps} bps</code>\nSwaps: <code>${escapeHtml(describeZapSwap(plan.estimate))}</code>`;
+			const preview = formatPreviewReply({
+				header: "🔍 <b>Rebalance preview</b>",
+				pool: snapshot.pool,
+				position: snapshot.position,
+				activeBinId: snapshot.activeBinId,
+				lowerBinId: snapshot.lowerBinId,
+				upperBinId: snapshot.upperBinId,
+				newLowerBinId: snapshot.activeBinId + plan.minDeltaId,
+				newUpperBinId: snapshot.activeBinId + plan.maxDeltaId,
+				amountXDisplay: formatTokenAmount(
+					plan.estimate.result.postSwapX,
+					snapshot.tokenXDecimals,
+					snapshot.tokenXSymbol,
+				),
+				amountYDisplay: formatTokenAmount(
+					plan.estimate.result.postSwapY,
+					snapshot.tokenYDecimals,
+					snapshot.tokenYSymbol,
+				),
+				slippageBps: plan.slippageBps,
+				dryRun: config.dryRun,
+				swapsDisplay: describeZapSwap(plan.estimate),
+			});
 			if (!command.confirmed) {
 				yield* replyText(
 					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
@@ -387,9 +427,7 @@ function drainPendingConfirm() {
 					snapshot.upperBinId,
 				)
 			) {
-				yield* replyText(
-					`<b>In range</b> — no rebalance needed.\nActive: <code>${snapshot.activeBinId}</code> within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`,
-				);
+				yield* replyText(formatInRangeReply(snapshot));
 				return;
 			}
 			const halfWidth = originalHalfRange(

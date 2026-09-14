@@ -1,0 +1,306 @@
+import { describe, expect, test } from "bun:test";
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
+import { Effect } from "effect";
+import { ConfigError, type EnvSource, loadConfig } from "../src/config.ts";
+import {
+	fetchTelegramUpdates,
+	nextUpdatesOffset,
+	parseBotCommand,
+} from "../src/telegram/commands.ts";
+import {
+	formatTelegramMessage,
+	notifyTelegramEvent,
+	sendTelegramEvent,
+	TelegramError,
+	type TelegramFetch,
+} from "../src/telegram/notify.ts";
+
+function makeEnv(overrides?: EnvSource): EnvSource {
+	return {
+		RPC_URL: "https://api.mainnet-beta.solana.com",
+		POOL_ADDRESS: Keypair.generate().publicKey.toBase58(),
+		PRIVATE_KEY: bs58.encode(Keypair.generate().secretKey),
+		...overrides,
+	};
+}
+
+function makeUpdate(updateId: number, chatId: number | string, text?: unknown) {
+	return {
+		update_id: updateId,
+		message: {
+			message_id: 1,
+			chat: { id: chatId, type: "private" },
+			text,
+		},
+	};
+}
+
+const okFetch: TelegramFetch = async (_url, _init) => ({
+	ok: true,
+	status: 200,
+	text: async () => "ok",
+	json: async () => ({ ok: true, result: true }),
+});
+
+describe("telegram config pairing", () => {
+	test("both absent means disabled", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.telegram).toBeUndefined();
+	});
+
+	test("both set enables telegram", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(
+				makeEnv({
+					TELEGRAM_BOT_TOKEN: "token123",
+					TELEGRAM_CHAT_ID: "987654",
+				}),
+			),
+		);
+		expect(config.telegram).toEqual({
+			botToken: "token123",
+			chatId: "987654",
+		});
+	});
+
+	test("only token set is a ConfigError", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(loadConfig(makeEnv({ TELEGRAM_BOT_TOKEN: "token123" }))),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("only chat id set is a ConfigError", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(loadConfig(makeEnv({ TELEGRAM_CHAT_ID: "987654" }))),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});
+
+describe("formatTelegramMessage", () => {
+	test("startup includes pool and dry-run mode", () => {
+		const text = formatTelegramMessage({
+			kind: "startup",
+			pool: "Pool111",
+			dryRun: true,
+		});
+		expect(text).toContain("Pool111");
+		expect(text).toContain("dry run");
+	});
+
+	test("shutdown is a short notice", () => {
+		expect(formatTelegramMessage({ kind: "shutdown" })).toContain("stopped");
+	});
+
+	test("rebalanceNeeded includes preview ranges", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanceNeeded",
+			pool: "Pool111",
+			position: "Pos222",
+			activeBinId: 1100,
+			lowerBinId: 966,
+			upperBinId: 1034,
+			newLowerBinId: 1066,
+			newUpperBinId: 1134,
+			amountX: "902690000",
+			amountY: "756000000",
+			slippageBps: 50,
+			dryRun: true,
+		});
+		expect(text).toContain("Pos222");
+		expect(text).toContain("966 to 1034");
+		expect(text).toContain("1066 to 1134");
+		expect(text).toContain("902690000");
+		expect(text).toContain("Dry run");
+	});
+
+	test("rebalanced includes signature link", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanced",
+			pool: "Pool111",
+			position: "Pos222",
+			signature: "Sig333",
+		});
+		expect(text).toContain("Sig333");
+		expect(text).toContain("https://solscan.io/tx/Sig333");
+	});
+
+	test("failed includes the error message", () => {
+		const text = formatTelegramMessage({
+			kind: "failed",
+			message: "boom",
+		});
+		expect(text).toContain("boom");
+	});
+});
+
+describe("parseBotCommand", () => {
+	const allowed = "987654";
+
+	test("parses /status", () => {
+		expect(parseBotCommand(makeUpdate(1, 987654, "/status"), allowed)).toEqual({
+			kind: "status",
+			chatId: allowed,
+			updateId: 1,
+		});
+	});
+
+	test("parses /help", () => {
+		expect(parseBotCommand(makeUpdate(2, 987654, "/help"), allowed)).toEqual({
+			kind: "help",
+			chatId: allowed,
+			updateId: 2,
+		});
+	});
+
+	test("parses /rebalance preview vs confirm", () => {
+		expect(
+			parseBotCommand(makeUpdate(3, 987654, "/rebalance"), allowed),
+		).toEqual({
+			kind: "rebalance",
+			chatId: allowed,
+			updateId: 3,
+			confirmed: false,
+		});
+		expect(
+			parseBotCommand(makeUpdate(4, 987654, "/rebalance confirm"), allowed),
+		).toEqual({
+			kind: "rebalance",
+			chatId: allowed,
+			updateId: 4,
+			confirmed: true,
+		});
+	});
+
+	test("strips @BotName suffix", () => {
+		const parsed = parseBotCommand(
+			makeUpdate(5, 987654, "/status@MyBot"),
+			allowed,
+		);
+		expect(parsed?.kind).toBe("status");
+	});
+
+	test("rejects wrong chat id", () => {
+		expect(
+			parseBotCommand(makeUpdate(6, 111111, "/status"), allowed),
+		).toBeNull();
+	});
+
+	test("ignores non-command text and missing text", () => {
+		expect(parseBotCommand(makeUpdate(7, 987654, "hello"), allowed)).toBeNull();
+		expect(
+			parseBotCommand(makeUpdate(8, 987654, undefined), allowed),
+		).toBeNull();
+		expect(parseBotCommand({ update_id: 9 }, allowed)).toBeNull();
+	});
+
+	test("unknown slash command parses as unknown", () => {
+		expect(parseBotCommand(makeUpdate(10, 987654, "/dance"), allowed)).toEqual({
+			kind: "unknown",
+			chatId: allowed,
+			updateId: 10,
+			text: "/dance",
+		});
+	});
+});
+
+describe("telegram offsets", () => {
+	test("advances past ignored updates", () => {
+		const updates = [
+			makeUpdate(41, 111111, "/status"),
+			makeUpdate(42, 987654, "/status"),
+		];
+		expect(nextUpdatesOffset(updates, undefined)).toBe(43);
+		expect(nextUpdatesOffset([], 43)).toBe(43);
+	});
+});
+
+describe("telegram send", () => {
+	const telegram = { botToken: "secret-token", chatId: "987654" };
+
+	test("send posts to api.telegram.org without failing on ok", async () => {
+		let seenUrl = "";
+		const capture: TelegramFetch = async (url, _init) => {
+			seenUrl = url;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		await Effect.runPromise(
+			sendTelegramEvent({ kind: "shutdown" }, telegram, capture),
+		);
+		expect(seenUrl).toContain("https://api.telegram.org/");
+		expect(seenUrl).not.toContain("PRIVATE_KEY");
+	});
+
+	test("send surfaces TelegramError on HTTP failure", async () => {
+		const failing: TelegramFetch = async () => ({
+			ok: false,
+			status: 500,
+			text: async () => "oops",
+			json: async () => null,
+		});
+		const error = await Effect.runPromise(
+			Effect.flip(sendTelegramEvent({ kind: "shutdown" }, telegram, failing)),
+		);
+		expect(error).toBeInstanceOf(TelegramError);
+	});
+
+	test("notify never fails and warns without the token", async () => {
+		const failing: TelegramFetch = async () => {
+			throw new Error("network down");
+		};
+		const warnings: string[] = [];
+		const original = console.warn;
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map(String).join(" "));
+		};
+		try {
+			await Effect.runPromise(
+				notifyTelegramEvent({ kind: "shutdown" }, telegram, failing),
+			);
+		} finally {
+			console.warn = original;
+		}
+		expect(warnings.length).toBe(1);
+		expect(warnings[0]).toContain("Telegram send failed");
+		expect(warnings[0]).not.toContain("secret-token");
+	});
+
+	test("notify is a no-op without network when disabled", async () => {
+		let called = false;
+		const spy: TelegramFetch = async (_url, _init) => {
+			called = true;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		await Effect.runPromise(
+			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
+		);
+		expect(called).toBe(false);
+		expect(okFetch).toBeDefined();
+	});
+
+	test("fetchTelegramUpdates returns raw results offline", async () => {
+		const updates = [makeUpdate(100, 987654, "/status")];
+		const good: TelegramFetch = async () => ({
+			ok: true,
+			status: 200,
+			text: async () => "",
+			json: async () => ({ ok: true, result: updates }),
+		});
+		const result = await Effect.runPromise(
+			fetchTelegramUpdates(telegram, undefined, good),
+		);
+		expect(result.length).toBe(1);
+	});
+});

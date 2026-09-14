@@ -8,6 +8,11 @@ export class ConfigError extends Data.TaggedError("ConfigError")<{
 	message: string;
 }> {}
 
+export interface TelegramConfig {
+	botToken: string;
+	chatId: string;
+}
+
 export interface BotConfig {
 	rpcUrl: string;
 	poolAddress: string;
@@ -19,6 +24,7 @@ export interface BotConfig {
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
 	pollIntervalMs: number;
+	telegram?: TelegramConfig;
 }
 
 export type EnvSource = Record<string, string | undefined>;
@@ -221,6 +227,20 @@ export function loadConfig(
 			3600000,
 		);
 
+		const botToken = optional("TELEGRAM_BOT_TOKEN", env);
+		const chatId = optional("TELEGRAM_CHAT_ID", env);
+		let telegram: TelegramConfig | undefined;
+		if (!botToken && !chatId) {
+			telegram = undefined;
+		} else if (botToken && chatId) {
+			telegram = { botToken, chatId };
+		} else {
+			return yield* new ConfigError({
+				message:
+					"invalid Telegram config: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be set or both absent",
+			});
+		}
+
 		return {
 			rpcUrl,
 			poolAddress: poolKey.toBase58(),
@@ -232,6 +252,7 @@ export function loadConfig(
 			jupiterApiKey,
 			secretKey,
 			pollIntervalMs,
+			telegram,
 		} satisfies BotConfig;
 	});
 }

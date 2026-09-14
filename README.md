@@ -1,8 +1,22 @@
+<p align="center">
+  <img src="docs/a6d220c1-55bc-4651-85c0-30f6fc51426e.png" alt="auto-rebalance-dlmm-bot">
+</p>
+
+<p align="center">
+  <strong>Keep your position in range.</strong>
+</p>
+
+<p align="center">
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
+  <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
+  <a href="https://effect.website"><img src="https://img.shields.io/badge/Effect-000000?style=flat&colorA=222222" alt="Effect"></a>
+</p>
+
 # Overview
 
 Keeps a [Meteora DLMM](https://docs.meteora.ag/get-started) liquidity position in range. When price moves out of your position, the bot removes liquidity, swaps the balancing leg, and zaps back in — using the same `@meteora-ag/zap-sdk` engine as the Meteora UI.
 
-Built with Bun, TypeScript, and Effect.
+**Bun** · **TypeScript** · **Effect**.
 
 ## How it works
 

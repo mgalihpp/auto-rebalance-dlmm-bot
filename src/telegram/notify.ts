@@ -28,7 +28,36 @@ export type TelegramEvent =
 	| { kind: "rebalanced"; pool: string; position: string; signature: string }
 	| { kind: "failed"; message: string };
 
-// Escape dynamic text for Telegram HTML parse_mode. Only &<> need it;
+// Persistent reply keyboard so the owner taps buttons instead of typing slash
+// commands. Labels are parsed back in commands.ts, so keep both in sync.
+export const TELEGRAM_MAIN_MENU = {
+	keyboard: [
+		[{ text: "📊 Status" }, { text: "👁 Preview" }],
+		[{ text: "✅ Confirm" }, { text: "❓ Help" }],
+	],
+	resize_keyboard: true,
+	is_persistent: true,
+} as const;
+
+export const TELEGRAM_BOT_COMMANDS = [
+	{ command: "status", description: "show position snapshot (read-only)" },
+	{ command: "help", description: "show help" },
+	{ command: "rebalance", description: "preview rebalance (no transactions)" },
+] as const;
+
+// Inline confirm button attached to live-mode previews. Tapping it emits a
+// callback_query with data "rebalance_confirm", parsed as a confirmed rebalance.
+export function confirmInlineKeyboard(dryRun: boolean) {
+	if (dryRun) {
+		return undefined;
+	}
+	return {
+		inline_keyboard: [
+			[{ text: "✅ Confirm live", callback_data: "rebalance_confirm" }],
+		],
+	} as const;
+}
+// Escape dynamic text for Telegram HTML parse_mode.
 // ">" is escaped too so arrows like "->" never read as markup.
 export function escapeHtml(text: string): string {
 	return text
@@ -86,10 +115,14 @@ function toTelegramError(error: unknown): TelegramError {
 }
 
 // Thin shell over raw fetch. Never logs the bot token or the request URL.
+export interface SendTelegramOptions {
+	replyMarkup?: unknown;
+}
 export function sendTelegramText(
 	text: string,
 	telegram: TelegramConfig,
 	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
+	options: SendTelegramOptions = {},
 ): Effect.Effect<void, TelegramError> {
 	return Effect.tryPromise({
 		try: async () => {
@@ -101,6 +134,7 @@ export function sendTelegramText(
 					chat_id: telegram.chatId,
 					text,
 					parse_mode: "HTML",
+					reply_markup: options.replyMarkup ?? TELEGRAM_MAIN_MENU,
 				}),
 			});
 			if (!response.ok) {
@@ -152,13 +186,59 @@ export function notifyTelegramText(
 	text: string,
 	telegram: TelegramConfig | undefined,
 	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
+	options: SendTelegramOptions = {},
 ): Effect.Effect<void, never> {
 	if (!telegram) {
 		return Effect.void;
 	}
-	return Effect.catch(sendTelegramText(text, telegram, fetchImpl), (error) =>
-		Effect.sync(() => {
-			console.warn(`[${nowStamp()}] Telegram send failed: ${error.message}`);
-		}),
+	return Effect.catch(
+		sendTelegramText(text, telegram, fetchImpl, options),
+		(error) =>
+			Effect.sync(() => {
+				console.warn(`[${nowStamp()}] Telegram send failed: ${error.message}`);
+			}),
 	);
+}
+
+// Registers the slash-command menu (the "/" button) as a best-effort setup
+// step. Failures never throw; the caller logs a warning.
+export function setTelegramMenuCommands(
+	telegram: TelegramConfig,
+	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
+): Effect.Effect<void, TelegramError> {
+	return Effect.tryPromise({
+		try: async () => {
+			const url = `https://api.telegram.org/bot${telegram.botToken}/setMyCommands`;
+			const response = await fetchImpl(url, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ commands: TELEGRAM_BOT_COMMANDS }),
+			});
+			if (!response.ok) {
+				throw new Error(
+					`telegram setMyCommands failed: HTTP ${response.status}`,
+				);
+			}
+		},
+		catch: toTelegramError,
+	});
+}
+
+// Dismisses the inline-button loading spinner. Best-effort, never throws.
+export function answerTelegramCallback(
+	callbackId: string,
+	telegram: TelegramConfig,
+	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
+): Effect.Effect<void, TelegramError> {
+	return Effect.tryPromise({
+		try: async () => {
+			const url = `https://api.telegram.org/bot${telegram.botToken}/answerCallbackQuery`;
+			await fetchImpl(url, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ callback_query_id: callbackId }),
+			});
+		},
+		catch: toTelegramError,
+	});
 }

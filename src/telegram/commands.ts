@@ -11,17 +11,75 @@ export class TelegramPollError extends Data.TaggedError("TelegramPollError")<{
 // Commands parsed once at the boundary from raw getUpdates payloads.
 // `unknown` carries the raw text for the help hint reply.
 export type BotCommand =
-	| { kind: "status"; chatId: string; updateId: number }
-	| { kind: "help"; chatId: string; updateId: number }
-	| { kind: "rebalance"; chatId: string; updateId: number; confirmed: boolean }
-	| { kind: "unknown"; chatId: string; updateId: number; text: string };
+	| { kind: "status"; chatId: string; updateId: number; callbackId?: string }
+	| { kind: "help"; chatId: string; updateId: number; callbackId?: string }
+	| {
+			kind: "rebalance";
+			chatId: string;
+			updateId: number;
+			confirmed: boolean;
+			callbackId?: string;
+	  }
+	| {
+			kind: "unknown";
+			chatId: string;
+			updateId: number;
+			text: string;
+			callbackId?: string;
+	  };
 
 export const TELEGRAM_HELP_TEXT =
-	"DLMM bot commands:\n/status - show position snapshot (read-only)\n/help - show this help\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)";
+	"DLMM bot commands (atau pakai tombol menu di bawah):\n/status - show position snapshot (read-only)\n/help - show this help\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)";
+
+// Menu button labels resolve to the same commands as their slash equivalents.
+const MENU_LABELS: Record<string, BotCommand["kind"]> = {
+	"📊 status": "status",
+	status: "status",
+	"❓ help": "help",
+	help: "help",
+	"👁 preview": "rebalance",
+	preview: "rebalance",
+	"✅ confirm": "rebalance",
+	confirm: "rebalance",
+};
+
+const CALLBACK_DATA: Record<string, BotCommand["kind"]> = {
+	status: "status",
+	help: "help",
+	rebalance_preview: "rebalance",
+	rebalance: "rebalance",
+	rebalance_confirm: "rebalance",
+};
+
+function commandFromMenuLabel(
+	normalized: string,
+	chatId: string,
+	id: number,
+	callbackId?: string,
+): BotCommand | null {
+	const kind = MENU_LABELS[normalized];
+	if (!kind) {
+		return null;
+	}
+	if (kind === "status") {
+		return { kind: "status", chatId, updateId: id, callbackId };
+	}
+	if (kind === "help") {
+		return { kind: "help", chatId, updateId: id, callbackId };
+	}
+	return {
+		kind: "rebalance",
+		chatId,
+		updateId: id,
+		confirmed: normalized.includes("confirm"),
+		callbackId,
+	};
+}
 
 // Parse one raw update. Returns null for anything to ignore: malformed
 // payloads, non-message updates, non-command text, and any chat id that does
-// not equal the allowlisted chatId.
+// not equal the allowlisted chatId. Handles message text (slash commands and
+// menu button labels) plus callback_query from inline buttons.
 export function parseBotCommand(
 	rawUpdate: unknown,
 	allowedChatId: string,
@@ -33,6 +91,52 @@ export function parseBotCommand(
 	const updateId = record.update_id;
 	if (!Number.isInteger(updateId)) {
 		return null;
+	}
+	const id = updateId as number;
+	const callback = record.callback_query;
+	if (typeof callback === "object" && callback !== null) {
+		const cb = callback as Record<string, unknown>;
+		const callbackId =
+			typeof cb.id === "string" ? (cb.id as string) : undefined;
+		const data =
+			typeof cb.data === "string" ? cb.data.trim().toLowerCase() : "";
+		const msg = cb.message as Record<string, unknown> | undefined;
+		const chat = msg?.chat as Record<string, unknown> | undefined;
+		const chatId = chat?.id;
+		if (typeof chatId !== "number" && typeof chatId !== "string") {
+			return null;
+		}
+		if (String(chatId) !== allowedChatId) {
+			return null;
+		}
+		const kind = CALLBACK_DATA[data];
+		if (kind === "status") {
+			return {
+				kind: "status",
+				chatId: allowedChatId,
+				updateId: id,
+				callbackId,
+			};
+		}
+		if (kind === "help") {
+			return { kind: "help", chatId: allowedChatId, updateId: id, callbackId };
+		}
+		if (kind === "rebalance") {
+			return {
+				kind: "rebalance",
+				chatId: allowedChatId,
+				updateId: id,
+				confirmed: data.includes("confirm"),
+				callbackId,
+			};
+		}
+		return {
+			kind: "unknown",
+			chatId: allowedChatId,
+			updateId: id,
+			text: typeof cb.data === "string" ? cb.data : "",
+			callbackId,
+		};
 	}
 	const message = record.message;
 	if (typeof message !== "object" || message === null) {
@@ -61,7 +165,6 @@ export function parseBotCommand(
 	const parts = text.split(/\s+/);
 	const first = parts[0] ?? "";
 	const base = (first.split("@")[0] ?? "").toLowerCase();
-	const id = updateId as number;
 	if (base === "/status") {
 		return { kind: "status", chatId: allowedChatId, updateId: id };
 	}
@@ -79,6 +182,10 @@ export function parseBotCommand(
 	}
 	if (base.startsWith("/")) {
 		return { kind: "unknown", chatId: allowedChatId, updateId: id, text };
+	}
+	const menu = commandFromMenuLabel(text.toLowerCase(), allowedChatId, id);
+	if (menu) {
+		return menu;
 	}
 	return null;
 }
@@ -174,7 +281,7 @@ export function fetchTelegramUpdates(
 		try: async () => {
 			const params = new URLSearchParams({
 				timeout: "0",
-				allowed_updates: JSON.stringify(["message"]),
+				allowed_updates: JSON.stringify(["message", "callback_query"]),
 			});
 			if (offset !== undefined) {
 				params.set("offset", String(offset));

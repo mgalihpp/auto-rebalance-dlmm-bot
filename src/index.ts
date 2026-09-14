@@ -21,9 +21,12 @@ import {
 	takePendingLiveConfirm,
 } from "./telegram/commands.ts";
 import {
+	answerTelegramCallback,
+	confirmInlineKeyboard,
 	escapeHtml,
 	notifyTelegramEvent,
 	notifyTelegramText,
+	setTelegramMenuCommands,
 	type TelegramEvent,
 } from "./telegram/notify.ts";
 import { formatBinRange, formatBn, formatSig, nowStamp } from "./utils.ts";
@@ -83,10 +86,12 @@ function notify(event: TelegramEvent) {
 	});
 }
 
-function replyText(text: string) {
+function replyText(text: string, replyMarkup?: unknown) {
 	return Effect.gen(function* () {
 		const config = yield* AppConfig;
-		yield* notifyTelegramText(text, config.telegram);
+		yield* notifyTelegramText(text, config.telegram, undefined, {
+			replyMarkup,
+		});
 	});
 }
 
@@ -127,7 +132,19 @@ const telegramPollIntervalMs = boot.telegramPollIntervalMs;
 
 await Effect.runPromise(
 	Effect.provide(
-		notify({ kind: "startup", pool: boot.pool, dryRun: boot.dryRun }),
+		Effect.gen(function* () {
+			const config = yield* AppConfig;
+			if (config.telegram) {
+				yield* Effect.catch(setTelegramMenuCommands(config.telegram), (error) =>
+					Effect.sync(() =>
+						console.warn(
+							`[${nowStamp()}] Telegram menu setup failed: ${error.message}`,
+						),
+					),
+				);
+			}
+			yield* notify({ kind: "startup", pool: boot.pool, dryRun: boot.dryRun });
+		}),
 		appLive,
 	),
 );
@@ -229,6 +246,13 @@ let telegramOffset: number | undefined;
 function handleBotCommand(command: BotCommand) {
 	return Effect.catch(
 		Effect.gen(function* () {
+			const config = yield* AppConfig;
+			if (command.callbackId && config.telegram) {
+				yield* Effect.catch(
+					answerTelegramCallback(command.callbackId, config.telegram),
+					() => Effect.void,
+				);
+			}
 			if (command.kind === "help") {
 				yield* replyText(TELEGRAM_HELP_TEXT);
 				return;
@@ -239,7 +263,6 @@ function handleBotCommand(command: BotCommand) {
 				);
 				return;
 			}
-			const config = yield* AppConfig;
 			if (
 				command.kind === "rebalance" &&
 				shouldDeferLiveConfirm(command, config.dryRun)
@@ -287,7 +310,8 @@ function handleBotCommand(command: BotCommand) {
 			const preview = `<b>Rebalance preview</b>\nPool: <code>${escapeHtml(snapshot.pool)}</code>\nPosition: <code>${escapeHtml(snapshot.position)}</code>\nActive: <code>${snapshot.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId))}</code>\nBalances: X=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapX))}</code> Y=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapY))}</code>\nSlippage: <code>${plan.slippageBps} bps</code>\nSwaps: <code>${escapeHtml(describeZapSwap(plan.estimate))}</code>`;
 			if (!command.confirmed) {
 				yield* replyText(
-					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Send <code>/rebalance confirm</code> to execute live."}`,
+					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
+					confirmInlineKeyboard(config.dryRun),
 				);
 				return;
 			}

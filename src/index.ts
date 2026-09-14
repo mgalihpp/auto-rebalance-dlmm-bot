@@ -15,9 +15,13 @@ import {
 	fetchTelegramUpdates,
 	nextUpdatesOffset,
 	parseBotCommand,
+	queuePendingLiveConfirm,
+	shouldDeferLiveConfirm,
 	TELEGRAM_HELP_TEXT,
+	takePendingLiveConfirm,
 } from "./telegram/commands.ts";
 import {
+	escapeHtml,
 	notifyTelegramEvent,
 	notifyTelegramText,
 	type TelegramEvent,
@@ -106,6 +110,7 @@ const boot = await Effect.runPromise(
 			const config = yield* AppConfig;
 			return {
 				pollIntervalMs: config.pollIntervalMs,
+				telegramPollIntervalMs: config.telegramPollIntervalMs,
 				pool: config.poolAddress,
 				dryRun: config.dryRun,
 			};
@@ -118,6 +123,7 @@ const boot = await Effect.runPromise(
 });
 
 const pollIntervalMs = boot.pollIntervalMs;
+const telegramPollIntervalMs = boot.telegramPollIntervalMs;
 
 await Effect.runPromise(
 	Effect.provide(
@@ -214,9 +220,10 @@ function runIteration() {
 	});
 }
 
-// Chat commands share the main poll cadence: one short-poll getUpdates per
-// iteration, no loop of their own. /rebalance is preview-only unless
-// DRY_RUN=false and the second step "/rebalance confirm" arrives.
+// Chat commands run on the fast TELEGRAM_POLL_INTERVAL_MS loop for no-delay
+// replies. Read-only commands execute immediately there; a confirmed-live
+// /rebalance confirm is queued as pending and consumed serialized with the
+// main iteration so two live executes can never overlap.
 let telegramOffset: number | undefined;
 
 function handleBotCommand(command: BotCommand) {
@@ -228,18 +235,28 @@ function handleBotCommand(command: BotCommand) {
 			}
 			if (command.kind === "unknown") {
 				yield* replyText(
-					`Unknown command: ${command.text}\n\n${TELEGRAM_HELP_TEXT}`,
+					`<b>Unknown command</b>\n<code>${escapeHtml(command.text)}</code>\n\n${TELEGRAM_HELP_TEXT}`,
 				);
 				return;
 			}
 			const config = yield* AppConfig;
+			if (
+				command.kind === "rebalance" &&
+				shouldDeferLiveConfirm(command, config.dryRun)
+			) {
+				queuePendingLiveConfirm(command);
+				yield* replyText(
+					`<b>Rebalance queued</b>\nLive execution will run in the main loop within one poll interval.`,
+				);
+				return;
+			}
 			const state = yield* loadPositionState({
 				poolAddress: config.poolAddress,
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
 				yield* replyText(
-					`Position snapshot\nPool: ${snapshot.pool}\nPosition: ${snapshot.position}\nActive: ${snapshot.activeBinId}\nRange: ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}\nBalances: X=${formatBn(snapshot.amountX)} Y=${formatBn(snapshot.amountY)}`,
+					`<b>Position snapshot</b>\nPool: <code>${escapeHtml(snapshot.pool)}</code>\nPosition: <code>${escapeHtml(snapshot.position)}</code>\nActive: <code>${snapshot.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>\nBalances: X=<code>${escapeHtml(formatBn(snapshot.amountX))}</code> Y=<code>${escapeHtml(formatBn(snapshot.amountY))}</code>`,
 				);
 				return;
 			}
@@ -251,7 +268,7 @@ function handleBotCommand(command: BotCommand) {
 				)
 			) {
 				yield* replyText(
-					`In range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
+					`<b>In range</b> — no rebalance needed.\nActive: <code>${snapshot.activeBinId}</code> within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`,
 				);
 				return;
 			}
@@ -267,19 +284,102 @@ function handleBotCommand(command: BotCommand) {
 				halfWidth,
 				jupiterApiKey: config.jupiterApiKey,
 			});
-			const preview = `Rebalance preview\nPool: ${snapshot.pool}\nPosition: ${snapshot.position}\nActive: ${snapshot.activeBinId}\nRange: ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)} -> ${formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId)}\nBalances: X=${formatBn(plan.estimate.result.postSwapX)} Y=${formatBn(plan.estimate.result.postSwapY)}\nSlippage: ${plan.slippageBps} bps\nSwaps: ${describeZapSwap(plan.estimate)}`;
+			const preview = `<b>Rebalance preview</b>\nPool: <code>${escapeHtml(snapshot.pool)}</code>\nPosition: <code>${escapeHtml(snapshot.position)}</code>\nActive: <code>${snapshot.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(snapshot.activeBinId + plan.minDeltaId, snapshot.activeBinId + plan.maxDeltaId))}</code>\nBalances: X=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapX))}</code> Y=<code>${escapeHtml(formatBn(plan.estimate.result.postSwapY))}</code>\nSlippage: <code>${plan.slippageBps} bps</code>\nSwaps: <code>${escapeHtml(describeZapSwap(plan.estimate))}</code>`;
 			if (!command.confirmed) {
 				yield* replyText(
-					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Send /rebalance confirm to execute live."}`,
+					`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Send <code>/rebalance confirm</code> to execute live."}`,
 				);
 				return;
 			}
+			yield* replyText(
+				`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).`,
+			);
+			// Live confirms defer earlier via shouldDeferLiveConfirm, so reaching
+			// here means preview-only. Never execute live in the fast loop.
+			return;
+		}),
+		(error) =>
+			Effect.sync(() => {
+				const message = error instanceof Error ? error.message : String(error);
+				console.warn(`[${nowStamp()}] Telegram command failed: ${message}`);
+			}),
+	);
+}
+
+function drainTelegramCommands() {
+	return Effect.gen(function* () {
+		const config = yield* AppConfig;
+		const telegram = config.telegram;
+		if (!telegram) {
+			return;
+		}
+		const rawUpdates = yield* Effect.catch(
+			fetchTelegramUpdates(telegram, telegramOffset),
+			(error) =>
+				Effect.sync(() => {
+					console.warn(
+						`[${nowStamp()}] Telegram poll failed: ${error.message}`,
+					);
+					return [] as unknown[];
+				}),
+		);
+		telegramOffset = nextUpdatesOffset(rawUpdates, telegramOffset);
+		for (const raw of rawUpdates) {
+			const command = parseBotCommand(raw, telegram.chatId);
+			if (!command) {
+				continue;
+			}
+			yield* handleBotCommand(command);
+		}
+	});
+}
+
+// Consume one queued live confirm serialized with the main iteration so two
+// live executes can never overlap. Never fails the iteration: errors become
+// a warning, like any other Telegram failure.
+function drainPendingConfirm() {
+	return Effect.catch(
+		Effect.gen(function* () {
+			const pending = takePendingLiveConfirm();
+			if (!pending) {
+				return;
+			}
+			const config = yield* AppConfig;
 			if (config.dryRun) {
+				// Defensive: config is fixed at startup, so queue-time and
+				// consume-time dryRun always agree. Stay preview-only rather
+				// than ever sending live while DRY_RUN=true.
+				yield* handleBotCommand(pending);
+				return;
+			}
+			const state = yield* loadPositionState({
+				poolAddress: config.poolAddress,
+			});
+			const snapshot = state.snapshot;
+			if (
+				!shouldRebalance(
+					snapshot.activeBinId,
+					snapshot.lowerBinId,
+					snapshot.upperBinId,
+				)
+			) {
 				yield* replyText(
-					`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides /rebalance confirm).`,
+					`<b>In range</b> — no rebalance needed.\nActive: <code>${snapshot.activeBinId}</code> within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`,
 				);
 				return;
 			}
+			const halfWidth = originalHalfRange(
+				snapshot.lowerBinId,
+				snapshot.upperBinId,
+			);
+			const plan = yield* planZapRebalance({
+				poolAddress: config.poolAddress,
+				positionAddress: snapshot.position,
+				strategy: config.strategy,
+				slippageBps: config.slippageBps,
+				halfWidth,
+				jupiterApiKey: config.jupiterApiKey,
+			});
 			const compound: CompoundFeesInput = {
 				enabled: config.compoundFees,
 				dlmm: state.dlmm,
@@ -321,50 +421,39 @@ function handleBotCommand(command: BotCommand) {
 	);
 }
 
-function drainTelegramCommands() {
-	return Effect.gen(function* () {
-		const config = yield* AppConfig;
-		const telegram = config.telegram;
-		if (!telegram) {
-			return;
+// Fast command loop on its own TELEGRAM_POLL_INTERVAL_MS timer for no-delay
+// replies. Shares the existing stopped flag with the main loop: SIGINT/SIGTERM
+// sets stopped and wakes the main sleep; the fast loop then exits promptly,
+// worst case within one telegram interval. No second shutdown path.
+async function telegramFastLoop() {
+	while (!stopped) {
+		await Effect.runPromise(
+			Effect.provide(drainTelegramCommands(), appLive),
+		).catch((error) => {
+			console.warn(`[${nowStamp()}] Telegram poll failed:`, error);
+		});
+		if (stopped) {
+			break;
 		}
-		const rawUpdates = yield* Effect.catch(
-			fetchTelegramUpdates(telegram, telegramOffset),
-			(error) =>
-				Effect.sync(() => {
-					console.warn(
-						`[${nowStamp()}] Telegram poll failed: ${error.message}`,
-					);
-					return [] as unknown[];
-				}),
-		);
-		telegramOffset = nextUpdatesOffset(rawUpdates, telegramOffset);
-		for (const raw of rawUpdates) {
-			const command = parseBotCommand(raw, telegram.chatId);
-			if (!command) {
-				continue;
-			}
-			yield* handleBotCommand(command);
-		}
-	});
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, telegramPollIntervalMs);
+		});
+	}
 }
+
+const telegramLoop = telegramFastLoop();
 
 while (!stopped) {
 	try {
 		await Effect.runPromise(Effect.provide(runIteration(), appLive));
+		// Serialize queued live confirms with the main iteration.
+		await Effect.runPromise(Effect.provide(drainPendingConfirm(), appLive));
 	} catch (error) {
 		console.error(`[${nowStamp()}] Rebalance failed:`, error);
 		const message = error instanceof Error ? error.message : String(error);
 		await Effect.runPromise(
 			Effect.provide(notify({ kind: "failed", message }), appLive),
 		);
-	}
-	if (!stopped) {
-		await Effect.runPromise(
-			Effect.provide(drainTelegramCommands(), appLive),
-		).catch((error) => {
-			console.warn(`[${nowStamp()}] Telegram poll failed:`, error);
-		});
 	}
 	if (stopped) {
 		break;
@@ -375,5 +464,7 @@ while (!stopped) {
 	});
 	wake = undefined;
 }
+
+await telegramLoop;
 
 await Effect.runPromise(Effect.provide(notify({ kind: "shutdown" }), appLive));

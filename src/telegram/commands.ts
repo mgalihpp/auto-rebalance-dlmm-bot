@@ -113,6 +113,46 @@ export function nextUpdatesOffset(
 	return current;
 }
 
+// Pending live-confirm handoff. The fast command loop queues confirmed-live
+// /rebalance here without touching RPC; the main loop consumes and executes
+// so two live executes can never overlap. Single slot: a second confirm
+// overwrites the first. Pure in-memory, never touches the network.
+let pendingLiveConfirm: Extract<BotCommand, { kind: "rebalance" }> | undefined;
+
+// True only for the live path: a confirmed /rebalance that may actually send.
+// DRY_RUN=true confirms stay preview-only and run immediately in the fast loop.
+export function shouldDeferLiveConfirm(
+	command: BotCommand,
+	dryRun: boolean,
+): boolean {
+	return command.kind === "rebalance" && command.confirmed && !dryRun;
+}
+
+export function queuePendingLiveConfirm(
+	command: Extract<BotCommand, { kind: "rebalance" }>,
+): void {
+	if (!command.confirmed) {
+		return;
+	}
+	pendingLiveConfirm = command;
+}
+
+export function takePendingLiveConfirm():
+	| Extract<BotCommand, { kind: "rebalance" }>
+	| undefined {
+	const pending = pendingLiveConfirm;
+	pendingLiveConfirm = undefined;
+	return pending;
+}
+
+export function hasPendingLiveConfirm(): boolean {
+	return pendingLiveConfirm !== undefined;
+}
+
+export function clearPendingLiveConfirm(): void {
+	pendingLiveConfirm = undefined;
+}
+
 function toPollError(error: unknown): TelegramError | TelegramPollError {
 	if (error instanceof TelegramError || error instanceof TelegramPollError) {
 		return error;
@@ -122,8 +162,8 @@ function toPollError(error: unknown): TelegramError | TelegramPollError {
 	});
 }
 
-// Single short-poll of getUpdates. Called once per main-loop iteration so
-// commands share the existing poll cadence instead of running their own loop.
+// Single short-poll of getUpdates. Called from the fast command loop on its
+// own TELEGRAM_POLL_INTERVAL_MS timer, not from the main iteration.
 // Never logs the bot token or the request URL.
 export function fetchTelegramUpdates(
 	telegram: TelegramConfig,

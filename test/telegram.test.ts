@@ -4,14 +4,22 @@ import bs58 from "bs58";
 import { Effect } from "effect";
 import { ConfigError, type EnvSource, loadConfig } from "../src/config.ts";
 import {
+	clearPendingLiveConfirm,
 	fetchTelegramUpdates,
+	hasPendingLiveConfirm,
 	nextUpdatesOffset,
 	parseBotCommand,
+	queuePendingLiveConfirm,
+	shouldDeferLiveConfirm,
+	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
 import {
+	escapeHtml,
 	formatTelegramMessage,
 	notifyTelegramEvent,
+	notifyTelegramText,
 	sendTelegramEvent,
+	sendTelegramText,
 	TelegramError,
 	type TelegramFetch,
 } from "../src/telegram/notify.ts";
@@ -302,5 +310,232 @@ describe("telegram send", () => {
 			fetchTelegramUpdates(telegram, undefined, good),
 		);
 		expect(result.length).toBe(1);
+	});
+});
+
+describe("telegram HTML structure", () => {
+	test("startup uses <b> header and <code> pool", () => {
+		const text = formatTelegramMessage({
+			kind: "startup",
+			pool: "Pool111",
+			dryRun: true,
+		});
+		expect(text).toContain("<b>");
+		expect(text).toContain("<code>Pool111</code>");
+	});
+
+	test("shutdown uses <b> header", () => {
+		const text = formatTelegramMessage({ kind: "shutdown" });
+		expect(text).toContain("<b>");
+	});
+
+	test("rebalanceNeeded uses <b>, <code> rows", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanceNeeded",
+			pool: "Pool111",
+			position: "Pos222",
+			activeBinId: 1100,
+			lowerBinId: 966,
+			upperBinId: 1034,
+			newLowerBinId: 1066,
+			newUpperBinId: 1134,
+			amountX: "902690000",
+			amountY: "756000000",
+			slippageBps: 50,
+			dryRun: true,
+		});
+		expect(text).toContain("<b>Rebalance needed</b>");
+		expect(text).toContain("<code>Pos222</code>");
+		expect(text).toContain("<code>1100</code>");
+		expect(text).toContain("<code>902690000</code>");
+	});
+
+	test("rebalanced links the signature via solscan <a href>", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanced",
+			pool: "Pool111",
+			position: "Pos222",
+			signature: "Sig333",
+		});
+		expect(text).toContain("<b>Rebalanced</b>");
+		expect(text).toContain('<a href="https://solscan.io/tx/Sig333">');
+		expect(text).toContain("<code>Sig333</code>");
+	});
+
+	test("failed uses <b> header and <code> message", () => {
+		const text = formatTelegramMessage({ kind: "failed", message: "boom" });
+		expect(text).toContain("<b>");
+		expect(text).toContain("<code>boom</code>");
+	});
+
+	test("sendMessage requests HTML parse_mode", async () => {
+		let seenBody = "";
+		const capture: TelegramFetch = async (_url, init) => {
+			seenBody = String((init as RequestInit)?.body ?? "");
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const telegram = { botToken: "token", chatId: "987654" };
+		await Effect.runPromise(sendTelegramText("hello", telegram, capture));
+		expect(JSON.parse(seenBody).parse_mode).toBe("HTML");
+	});
+});
+
+describe("telegram HTML escaping", () => {
+	test("escapeHtml escapes <>&", () => {
+		expect(escapeHtml("<>&")).toBe("&lt;&gt;&amp;");
+		expect(escapeHtml("a<b>&c")).toBe("a&lt;b&gt;&amp;c");
+	});
+
+	test("failed event escapes hostile input", () => {
+		const hostile = '<script>alert("x")&</script>';
+		const text = formatTelegramMessage({ kind: "failed", message: hostile });
+		expect(text).not.toContain("<script>");
+		expect(text).toContain("&lt;script&gt;");
+		expect(text).toContain("&amp;");
+	});
+
+	test("rebalanced escapes hostile pool text", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanced",
+			pool: "<evil>&",
+			position: "Pos222",
+			signature: "Sig333",
+		});
+		expect(text).not.toContain("<evil>");
+		expect(text).toContain("&lt;evil&gt;&amp;");
+	});
+});
+
+describe("telegram poll interval config", () => {
+	test("defaults to 3000 when unset", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.telegramPollIntervalMs).toBe(3000);
+	});
+
+	test("accepts a valid custom value", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(makeEnv({ TELEGRAM_POLL_INTERVAL_MS: "1000" })),
+		);
+		expect(config.telegramPollIntervalMs).toBe(1000);
+	});
+
+	test("rejects below-min with ConfigError", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(loadConfig(makeEnv({ TELEGRAM_POLL_INTERVAL_MS: "500" }))),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("rejects above-max with ConfigError", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(loadConfig(makeEnv({ TELEGRAM_POLL_INTERVAL_MS: "70000" }))),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("rejects non-integer with ConfigError", async () => {
+		const error = await Effect.runPromise(
+			Effect.flip(loadConfig(makeEnv({ TELEGRAM_POLL_INTERVAL_MS: "abc" }))),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});
+
+describe("pending-confirm handoff", () => {
+	test("shouldDefer only for confirmed-live rebalance", () => {
+		const liveConfirm = {
+			kind: "rebalance",
+			chatId: "987654",
+			updateId: 1,
+			confirmed: true,
+		} as const;
+		const preview = { ...liveConfirm, confirmed: false };
+		const status = { kind: "status", chatId: "987654", updateId: 2 } as const;
+		expect(shouldDeferLiveConfirm(liveConfirm, false)).toBe(true);
+		expect(shouldDeferLiveConfirm(liveConfirm, true)).toBe(false);
+		expect(shouldDeferLiveConfirm(preview, false)).toBe(false);
+		expect(shouldDeferLiveConfirm(status, false)).toBe(false);
+	});
+
+	test("DRY_RUN=true confirm stays preview (never defers)", () => {
+		const confirm = {
+			kind: "rebalance",
+			chatId: "987654",
+			updateId: 3,
+			confirmed: true,
+		} as const;
+		expect(shouldDeferLiveConfirm(confirm, true)).toBe(false);
+	});
+
+	test("queue without main-loop consumption sends nothing live", async () => {
+		clearPendingLiveConfirm();
+		let called = false;
+		const spy: TelegramFetch = async () => {
+			called = true;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const confirm = {
+			kind: "rebalance",
+			chatId: "987654",
+			updateId: 4,
+			confirmed: true,
+		} as const;
+		queuePendingLiveConfirm(confirm);
+		expect(hasPendingLiveConfirm()).toBe(true);
+		expect(called).toBe(false);
+		expect(spy).toBeDefined();
+		const taken = takePendingLiveConfirm();
+		expect(taken).toEqual(confirm);
+		expect(hasPendingLiveConfirm()).toBe(false);
+		expect(called).toBe(false);
+		clearPendingLiveConfirm();
+	});
+
+	test("unconfirmed rebalance never queues", () => {
+		clearPendingLiveConfirm();
+		queuePendingLiveConfirm({
+			kind: "rebalance",
+			chatId: "987654",
+			updateId: 5,
+			confirmed: false,
+		});
+		expect(hasPendingLiveConfirm()).toBe(false);
+		clearPendingLiveConfirm();
+	});
+});
+
+describe("fast-loop disabled no-op", () => {
+	test("notify text and event without telegram never hit network", async () => {
+		let called = false;
+		const spy: TelegramFetch = async () => {
+			called = true;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		await Effect.runPromise(
+			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
+		);
+		await Effect.runPromise(notifyTelegramText("hello", undefined, spy));
+		expect(called).toBe(false);
+	});
+
+	test("disabled config leaves telegram unset with a fast default", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.telegram).toBeUndefined();
+		expect(config.telegramPollIntervalMs).toBe(3000);
 	});
 });

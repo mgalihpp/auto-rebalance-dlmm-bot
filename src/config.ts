@@ -24,6 +24,7 @@ export interface BotConfig {
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
 	pollIntervalMs: number;
+	telegramPollIntervalMs: number;
 	telegram?: TelegramConfig;
 }
 
@@ -226,6 +227,13 @@ export function loadConfig(
 			5000,
 			3600000,
 		);
+		const telegramPollIntervalMs = yield* parseIntVar(
+			"TELEGRAM_POLL_INTERVAL_MS",
+			optional("TELEGRAM_POLL_INTERVAL_MS", env),
+			3000,
+			1000,
+			60000,
+		);
 
 		const botToken = optional("TELEGRAM_BOT_TOKEN", env);
 		const chatId = optional("TELEGRAM_CHAT_ID", env);
@@ -252,6 +260,7 @@ export function loadConfig(
 			jupiterApiKey,
 			secretKey,
 			pollIntervalMs,
+			telegramPollIntervalMs,
 			telegram,
 		} satisfies BotConfig;
 	});

@@ -1,6 +1,6 @@
 import { Data, Effect } from "effect";
 import type { TelegramConfig } from "../config.ts";
-import { formatBinRange, formatSig, nowStamp } from "../utils.ts";
+import { formatBinRange, nowStamp, solscanTxUrl } from "../utils.ts";
 
 export class TelegramError extends Data.TaggedError("TelegramError")<{
 	message: string;
@@ -28,6 +28,15 @@ export type TelegramEvent =
 	| { kind: "rebalanced"; pool: string; position: string; signature: string }
 	| { kind: "failed"; message: string };
 
+// Escape dynamic text for Telegram HTML parse_mode. Only &<> need it;
+// ">" is escaped too so arrows like "->" never read as markup.
+export function escapeHtml(text: string): string {
+	return text
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
 // Single formatter table over the union. Add new event kinds here, not with
 // scattered conditionals at the call sites.
 const telegramFormatters: {
@@ -36,14 +45,14 @@ const telegramFormatters: {
 	) => string;
 } = {
 	startup: (event) =>
-		`DLMM bot started\nPool: ${event.pool}\nMode: ${event.dryRun ? "dry run (preview only)" : "LIVE (will send transactions)"}`,
-	shutdown: () => "DLMM bot stopped.",
+		`<b>DLMM bot started</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nMode: ${event.dryRun ? "dry run (preview only)" : "<b>LIVE</b> (will send transactions)"}`,
+	shutdown: () => "<b>DLMM bot stopped.</b>",
 	rebalanceNeeded: (event) =>
-		`Rebalance needed\nPool: ${event.pool}\nPosition: ${event.position}\nActive bin: ${event.activeBinId}\nRange: ${formatBinRange(event.lowerBinId, event.upperBinId)} -> ${formatBinRange(event.newLowerBinId, event.newUpperBinId)}\nBalances: X=${event.amountX} Y=${event.amountY}\nSlippage: ${event.slippageBps} bps\n${event.dryRun ? "Dry run — no transactions sent." : "LIVE — executing."}`,
+		`<b>Rebalance needed</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nPosition: <code>${escapeHtml(event.position)}</code>\nActive: <code>${event.activeBinId}</code>\nRange: <code>${escapeHtml(formatBinRange(event.lowerBinId, event.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(event.newLowerBinId, event.newUpperBinId))}</code>\nBalances: X=<code>${escapeHtml(event.amountX)}</code> Y=<code>${escapeHtml(event.amountY)}</code>\nSlippage: <code>${event.slippageBps} bps</code>\n${event.dryRun ? "Dry run — no transactions sent." : "<b>LIVE</b> — executing."}`,
 	rebalanced: (event) =>
-		`Rebalanced\nPool: ${event.pool}\nPosition: ${event.position}\n${formatSig(event.signature)}`,
+		`<b>Rebalanced</b>\nPool: <code>${escapeHtml(event.pool)}</code>\nPosition: <code>${escapeHtml(event.position)}</code>\nTx: <a href="${solscanTxUrl(event.signature)}"><code>${escapeHtml(event.signature)}</code></a>`,
 	failed: (event) =>
-		`Rebalance iteration failed: ${event.message.slice(0, 1000)}`,
+		`<b>Rebalance failed</b>\n<code>${escapeHtml(event.message.slice(0, 1000))}</code>`,
 };
 
 export function formatTelegramMessage(event: TelegramEvent): string {
@@ -88,7 +97,11 @@ export function sendTelegramText(
 			const response = await fetchImpl(url, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ chat_id: telegram.chatId, text }),
+				body: JSON.stringify({
+					chat_id: telegram.chatId,
+					text,
+					parse_mode: "HTML",
+				}),
 			});
 			if (!response.ok) {
 				const body = await response.text().catch(() => "");

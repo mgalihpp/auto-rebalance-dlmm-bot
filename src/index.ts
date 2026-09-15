@@ -231,12 +231,10 @@ function runIteration() {
 		});
 		const compound: CompoundFeesInput = {
 			enabled: tunables.compoundFees,
-			dlmm: state.dlmm,
+			poolAddress: tunables.poolAddress,
 			positionAddress: snapshot.position,
 			feeX: snapshot.feeX,
 			feeY: snapshot.feeY,
-			minBinId: snapshot.activeBinId - halfWidth,
-			maxBinId: snapshot.activeBinId + halfWidth,
 			strategy: tunables.strategy,
 			slippageBps: tunables.slippageBps,
 		};
@@ -591,12 +589,10 @@ function drainPendingConfirm() {
 			});
 			const compound: CompoundFeesInput = {
 				enabled: tunables.compoundFees,
-				dlmm: state.dlmm,
+				poolAddress: tunables.poolAddress,
 				positionAddress: snapshot.position,
 				feeX: snapshot.feeX,
 				feeY: snapshot.feeY,
-				minBinId: snapshot.activeBinId - halfWidth,
-				maxBinId: snapshot.activeBinId + halfWidth,
 				strategy: tunables.strategy,
 				slippageBps: tunables.slippageBps,
 			};

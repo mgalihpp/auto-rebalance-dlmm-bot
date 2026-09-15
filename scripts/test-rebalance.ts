@@ -62,12 +62,10 @@ const main = Effect.gen(function* () {
 	);
 	const compound: CompoundFeesInput = {
 		enabled: botConfig.compoundFees,
-		dlmm: state.dlmm,
+		poolAddress: botConfig.poolAddress,
 		positionAddress: snapshot.position,
 		feeX: snapshot.feeX,
 		feeY: snapshot.feeY,
-		minBinId: snapshot.activeBinId - halfWidth,
-		maxBinId: snapshot.activeBinId + halfWidth,
 		strategy: botConfig.strategy,
 		slippageBps: botConfig.slippageBps,
 	};

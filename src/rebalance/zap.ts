@@ -1,4 +1,4 @@
-import type DLMM from "@meteora-ag/dlmm";
+import DLMM from "@meteora-ag/dlmm";
 import type {
 	DlmmDirectRebalanceEstimate,
 	RebalanceDlmmPositionResponse,
@@ -61,12 +61,10 @@ export interface ZapExecuteInput {
 // wallet after a rebalance unless this top-up deposits them back.
 export interface CompoundFeesInput {
 	enabled: boolean;
-	dlmm: DLMM;
+	poolAddress: string;
 	positionAddress: string;
 	feeX: BN;
 	feeY: BN;
-	minBinId: number;
-	maxBinId: number;
 	strategy: StrategyKind;
 	slippageBps: number;
 }
@@ -275,8 +273,16 @@ function executeCompoundTopUp(
 		}
 		const connection = yield* SolanaConnection;
 		const signer = yield* AppSigner;
+		const lbPair = yield* Effect.try({
+			try: () => new PublicKey(input.poolAddress),
+			catch: (error) => toZapError(error),
+		});
+		const positionPubKey = yield* Effect.try({
+			try: () => new PublicKey(input.positionAddress),
+			catch: (error) => toZapError(error),
+		});
 		const pairState = yield* Effect.tryPromise({
-			try: () => getLbPairState(connection, input.dlmm.pubkey),
+			try: () => getLbPairState(connection, lbPair),
 			catch: toZapError,
 		});
 		const balX = yield* readAtaBalance(pairState.tokenXMint);
@@ -288,17 +294,25 @@ function executeCompoundTopUp(
 			);
 			return null;
 		}
+		const fresh = yield* Effect.tryPromise({
+			try: () => DLMM.create(connection, lbPair),
+			catch: toZapError,
+		});
+		const freshPosition = yield* Effect.tryPromise({
+			try: () => fresh.getPosition(positionPubKey),
+			catch: toZapError,
+		});
 		// DLMM add-liquidity slippage is a percentage (0-100), not bps: the
 		// SDK caps it at 100 and scales it by bin step.
 		const tx = yield* Effect.tryPromise({
 			try: () =>
-				input.dlmm.addLiquidityByStrategy({
-					positionPubKey: new PublicKey(input.positionAddress),
+				fresh.addLiquidityByStrategy({
+					positionPubKey,
 					totalXAmount: amounts.x,
 					totalYAmount: amounts.y,
 					strategy: {
-						minBinId: input.minBinId,
-						maxBinId: input.maxBinId,
+						minBinId: freshPosition.positionData.lowerBinId,
+						maxBinId: freshPosition.positionData.upperBinId,
 						strategyType: toStrategyType(input.strategy),
 					},
 					user: signer.publicKey,

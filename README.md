@@ -14,27 +14,25 @@
 
 # Overview
 
-Keeps a [Meteora DLMM](https://docs.meteora.ag/get-started) liquidity position in range. When price moves out of your position, the bot removes liquidity, swaps the balancing leg, and zaps back in — using the same `@meteora-ag/zap-sdk` engine as the Meteora UI.
-
-**Bun** · **TypeScript** · **Effect**.
+Keeps a [Meteora DLMM](https://docs.meteora.ag/get-started) liquidity position in range. When price moves out of your position, the bot removes liquidity, swaps the balancing leg, and zaps back in. It uses the same `@meteora-ag/zap-sdk` code as the Meteora UI.
 
 ## How it works
 
 1. On every poll interval, the bot loads your position and checks the active bin against your position range.
 2. If the active bin is still inside the range, it logs and sleeps until the next check.
 3. If price moved out of range, it:
-   - Reuses your current range width, re-centered on the active bin,
-   - Asks `zap-sdk` to estimate the balancing swap,
-   - Builds a remove → swap → zap-in sequence for the existing position,
-   - Sends the transaction (unless `DRY_RUN=true`).
+   - Reuses your current range width, re-centered on the active bin.
+   - Asks `zap-sdk` to estimate the balancing swap.
+   - Builds a remove → swap → zap-in sequence for the existing position.
+   - Sends the transaction unless `DRY_RUN=true`.
 
-Claimed fees are part of the withdrawn proceeds, so they get redeposited on rebalance.
+Claimed fees come out with the withdrawal. By default they stay in your wallet. Set `COMPOUND_FEES=true` to put them back in on rebalance.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) installed
 - A Solana wallet with an existing funded DLMM position
-- A [Helius](https://helius.dev) RPC endpoint (recommended, see below)
+- A [Helius](https://helius.dev) RPC endpoint. Recommended, see below.
 
 ## Getting started
 
@@ -51,8 +49,8 @@ POOL_ADDRESS=<dlmm-pool-pubkey>
 PRIVATE_KEY=<bs58-secret-key>
 ```
 
-> Use a Helius RPC for `RPC_URL`. `getPriorityFeeEstimate` is Helius-only
-> (other RPCs fall back to 0 priority fee), and the public
+> Use a Helius RPC for `RPC_URL`. `getPriorityFeeEstimate` is Helius-only.
+> Other RPCs fall back to 0 priority fee, and the public
 > `api.mainnet-beta.solana.com` endpoint is rate-limited for the poll loop.
 > Get a free API key at [helius.dev](https://helius.dev).
 
@@ -70,24 +68,24 @@ The bot starts in `DRY_RUN=true` by default, so it only prints what it *would* d
 
 | Variable | Required | Default | Description |
 | --- | :---: | --- | --- |
-| `RPC_URL` | Yes | — | Solana RPC endpoint (Helius recommended) |
-| `POOL_ADDRESS` | Yes | — | DLMM pool address the bot manages |
-| `PRIVATE_KEY` | Yes | — | Wallet secret key (bs58, 64 bytes) |
-| `DRY_RUN` | No | `true` | If `true`, preview only — no transactions are sent |
+| `RPC_URL` | Yes | none | Solana RPC endpoint (Helius recommended) |
+| `POOL_ADDRESS` | Yes | none | DLMM pool address the bot manages |
+| `PRIVATE_KEY` | Yes | none | Wallet secret key (bs58, 64 bytes) |
+| `DRY_RUN` | No | `true` | If `true`, preview only, it sends nothing |
 | `COMPOUND_FEES` | No | `false` | If `true`, redeposit claimed fees back into the position after a rebalance; if `false`, claimed fees stay in the wallet |
 | `SLIPPAGE_BPS` | No | `50` | Slippage tolerance in basis points (0–10000) |
 | `STRATEGY` | No | `Curve` | Liquidity shape: `Spot`, `Curve`, or `BidAsk` |
-| `JUPITER_API_KEY` | No | — | Optional Jupiter API key for zap routing |
+| `JUPITER_API_KEY` | No | none | Optional Jupiter API key for zap routing |
 | `POLL_INTERVAL_MS` | No | `60000` | Recheck interval in ms (5000–3600000) |
-| `TELEGRAM_BOT_TOKEN` | No | — | Bot token for Telegram alerts + commands (both Telegram vars set enables it, both empty disables it) |
-| `TELEGRAM_CHAT_ID` | No | — | Private chat id the bot talks to (only this chat is answered) |
+| `TELEGRAM_BOT_TOKEN` | No | none | Bot token for Telegram alerts and commands. Set both Telegram vars to enable, leave both empty to disable. |
+| `TELEGRAM_CHAT_ID` | No | none | Private chat id the bot talks to. It ignores every other chat. |
 | `TELEGRAM_POLL_INTERVAL_MS` | No | `3000` | Telegram command poll interval in ms (1000–60000), separate from `POLL_INTERVAL_MS` |
 
-Stop the bot with `Ctrl+C` (`SIGINT`/`SIGTERM` are handled gracefully).
+Stop the bot with `Ctrl+C`. It shuts down cleanly on `SIGINT` and `SIGTERM`.
 
 ## Example output
 
-Dry run, rebalance needed:
+Dry run when a rebalance is needed.
 
 ```text
 === DLMM auto-rebalance preview (zap) ===
@@ -102,13 +100,13 @@ Slippage:        50 bps
 Dry run — no transactions sent.
 ```
 
-In range, nothing to do:
+In range, nothing to do.
 
 ```text
 Position in range (active 4521 within 4487-4555) — no rebalance needed.
 ```
 
-Live run:
+Live run.
 
 ```text
 Rebalanced via zap: <transaction-signature>
@@ -116,17 +114,14 @@ Rebalanced via zap: <transaction-signature>
 
 ## Telegram
 
-Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to get private chat alerts
-(startup, shutdown, rebalance needed with preview, rebalanced with Solscan
-link, iteration failure). Healthy polls stay silent.
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to get private chat alerts for startup, shutdown, rebalance previews, completed rebalances with Solscan link, and iteration failures. Healthy polls stay silent.
 
-Commands are answered within one `TELEGRAM_POLL_INTERVAL_MS`:
+The bot replies within one `TELEGRAM_POLL_INTERVAL_MS`.
 
-- `/status` — read-only position snapshot
-- `/help` — list commands
-- `/rebalance` — preview only, never sends
-- `/rebalance confirm` — queues a live execution, which runs serialized with
-  the main loop (still preview-only while `DRY_RUN=true`)
+- `/status`. Read-only position snapshot.
+- `/help`. List commands.
+- `/rebalance`. Preview only, never sends.
+- `/rebalance confirm`. Queue a live run. It runs serialized with the main loop, and still only previews while `DRY_RUN=true`.
 
 ```text
 index.ts                  # entrypoint, re-exports src/
@@ -161,12 +156,12 @@ bun run typecheck        # tsc --noEmit
 
 Notes:
 
-- `@solana/web3.js` must stay on v1 — the DLMM SDK and Jupiter examples rely on the v1 API.
+- `@solana/web3.js` must stay on v1. The DLMM SDK and Jupiter examples rely on the v1 API.
 - Money math uses `bn.js` for on-chain amounts and `decimal.js` for price/bin math. Don't use floats for amounts.
-- Tests are offline by design — no RPC or network calls in `bun test`.
-- Biome enforces tabs + double quotes. Run `bun run check:write` after touching scaffolded files.
+- Tests are offline by design. No RPC or network calls in `bun test`.
+- Biome enforces tabs and double quotes. Run `bun run check:write` after edits.
 
-There is also a manual trigger for one-off rebalances (sends **real** transactions, no dry-run):
+You can also trigger a one-off rebalance manually. It sends real transactions with no dry run.
 
 ```bash
 bun run scripts/test-rebalance.ts --live
@@ -176,12 +171,12 @@ Without `--live` it exits immediately without touching RPC. It waits 5 seconds b
 
 ## Safety
 
-- Start with `DRY_RUN=true` and a dedicated wallet with limited funds.
+- Start with `DRY_RUN=true` and a dedicated wallet with limited funds. I would not point this at a wallet you cannot afford to lose.
 - Never commit `.env` or log your `PRIVATE_KEY`. `.env*` is gitignored.
-- Understand the zap flow (remove → swap → deposit) and its slippage/IL implications before running with `DRY_RUN=false`.
+- The zap flow removes liquidity, swaps, then deposits again. Understand its slippage and IL implications before you run with `DRY_RUN=false`.
 
 ## Resources
 
-- `docs/meteora-llms-full.txt` — DLMM SDK reference (`DLMM.create`, positions, rebalance, fees)
-- `docs/jupiter-llms-full.txt`, `docs/jupiter-llms.txt` — Jupiter Swap API V2 flows
+- `docs/meteora-llms-full.txt`. DLMM SDK reference, covers `DLMM.create`, positions, rebalance, fees.
+- `docs/jupiter-llms-full.txt`, `docs/jupiter-llms.txt`. Jupiter Swap API V2 flows.
 - [Meteora DLMM docs](https://docs.meteora.ag/get-started)

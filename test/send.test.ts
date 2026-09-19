@@ -17,10 +17,17 @@ describe("computeUnitLimitWithBuffer", () => {
 		expect(computeUnitLimitWithBuffer(2_000_000)).toBe(1_400_000);
 	});
 
+	test("accepts a custom multiplier (swap leg)", () => {
+		expect(computeUnitLimitWithBuffer(40167, 1.5)).toBe(Math.ceil(40167 * 1.5));
+		expect(computeUnitLimitWithBuffer(2_000_000, 1.5)).toBe(1_400_000);
+	});
+
 	test("rejects non-positive input", () => {
 		expect(() => computeUnitLimitWithBuffer(0)).toThrow(SendError);
 		expect(() => computeUnitLimitWithBuffer(-5)).toThrow(SendError);
 		expect(() => computeUnitLimitWithBuffer(Number.NaN)).toThrow(SendError);
+		expect(() => computeUnitLimitWithBuffer(1000, 0)).toThrow(SendError);
+		expect(() => computeUnitLimitWithBuffer(1000, -1)).toThrow(SendError);
 	});
 });
 

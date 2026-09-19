@@ -16,6 +16,11 @@ export class SendError extends Data.TaggedError("SendError")<{
 export const SIMULATION_CU_LIMIT = 1_400_000;
 export const MAX_CU_LIMIT = 1_400_000;
 export const CU_BUFFER_MULTIPLIER = 1.1;
+// Swap legs consume variable CU depending on route and pool state at landing
+// slot, so the 10% default is too tight (seen: sim 40167, limit 44184,
+// on-chain ComputationalBudgetExceeded). 50% headroom costs fractions of a
+// cent in priority-fee cap and only applies to the swap leg.
+export const SWAP_CU_BUFFER_MULTIPLIER = 1.5;
 export const COMPUTE_BUDGET_PROGRAM_ID =
 	"ComputeBudget111111111111111111111111111111";
 // Helius getPriorityFeeEstimate levels, Min -> UnsafeMax, plus Auto: let
@@ -48,6 +53,7 @@ export interface SendManualInput {
 	pollMs?: number;
 	resendMs?: number;
 	priorityLevel?: PrioritySetting;
+	cuBufferMultiplier?: number;
 }
 
 function toSendError(error: unknown): SendError {
@@ -63,13 +69,21 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function computeUnitLimitWithBuffer(unitsConsumed: number): number {
+export function computeUnitLimitWithBuffer(
+	unitsConsumed: number,
+	multiplier: number = CU_BUFFER_MULTIPLIER,
+): number {
 	if (!Number.isFinite(unitsConsumed) || unitsConsumed <= 0) {
 		throw new SendError({
 			message: `invalid unitsConsumed: ${String(unitsConsumed)}`,
 		});
 	}
-	const buffered = Math.ceil(unitsConsumed * CU_BUFFER_MULTIPLIER);
+	if (!Number.isFinite(multiplier) || multiplier <= 0) {
+		throw new SendError({
+			message: `invalid cuBufferMultiplier: ${String(multiplier)}`,
+		});
+	}
+	const buffered = Math.ceil(unitsConsumed * multiplier);
 	return Math.min(Math.max(buffered, 1), MAX_CU_LIMIT);
 }
 
@@ -238,7 +252,10 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 							message: "simulation failed to return unitsConsumed",
 						});
 					}
-					const cuLimit = computeUnitLimitWithBuffer(unitsConsumed);
+					const cuLimit = computeUnitLimitWithBuffer(
+						unitsConsumed,
+						input.cuBufferMultiplier ?? CU_BUFFER_MULTIPLIER,
+					);
 					const probeBase58 = bs58.encode(simTx.serialize());
 					const microLamports = await fetchPriorityFeeEstimate(
 						connection.rpcEndpoint,

@@ -3,6 +3,7 @@ import {
 	buildComputeBudgetInstructions,
 	COMPUTE_BUDGET_PROGRAM_ID,
 	computeUnitLimitWithBuffer,
+	isRetryableSimulationError,
 	parsePriorityFeeEstimate,
 	SendError,
 } from "../src/rebalance/send.ts";
@@ -48,6 +49,21 @@ describe("buildComputeBudgetInstructions", () => {
 
 	test("rejects an out-of-range limit", () => {
 		expect(() => buildComputeBudgetInstructions(0, 0)).toThrow(SendError);
+	});
+});
+
+describe("isRetryableSimulationError", () => {
+	test("retries stale blockhash simulation failures", () => {
+		expect(isRetryableSimulationError("BlockhashNotFound")).toBe(true);
+		expect(isRetryableSimulationError({ err: "BlockhashNotFound" })).toBe(true);
+		expect(isRetryableSimulationError("blockhash not found")).toBe(true);
+		expect(isRetryableSimulationError("blockhash expired")).toBe(true);
+	});
+
+	test("aborts on real program failures", () => {
+		expect(isRetryableSimulationError("InstructionError")).toBe(false);
+		expect(isRetryableSimulationError(null)).toBe(false);
+		expect(isRetryableSimulationError(undefined)).toBe(false);
 	});
 });
 

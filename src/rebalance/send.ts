@@ -207,6 +207,30 @@ async function fetchPriorityFeeEstimate(
 // throw SendError and abort without retry.
 class RetryableSendError extends Error {}
 
+// Simulation can hit a different RPC node than the blockhash fetch on
+// load-balanced endpoints, so a just-fetched hash can already read as
+// unknown. Every blockhash-flavored simulation failure wants a fresh hash
+// and one more attempt, not an aborted iteration.
+export function isRetryableSimulationError(error: unknown): boolean {
+	let text: string;
+	if (typeof error === "string") {
+		text = error;
+	} else if (error instanceof Error) {
+		text = error.message;
+	} else {
+		try {
+			const raw = JSON.stringify(error);
+			if (typeof raw !== "string") {
+				return false;
+			}
+			text = raw;
+		} catch {
+			return false;
+		}
+	}
+	return /blockhash/i.test(text) && /not\s*found|expired/i.test(text);
+}
+
 export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 	function* (
 		input: SendManualInput,
@@ -242,8 +266,14 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 
 					const simulation = await connection.simulateTransaction(simTx);
 					if (simulation.value.err) {
+						const raw = JSON.stringify(simulation.value.err);
+						if (isRetryableSimulationError(raw)) {
+							throw new RetryableSendError(
+								`[${label}] simulation hit a stale blockhash, retrying with a fresh one: ${raw}`,
+							);
+						}
 						throw new SendError({
-							message: `simulation failed: ${JSON.stringify(simulation.value.err)}`,
+							message: `[${label}] simulation failed: ${raw}`,
 						});
 					}
 					const unitsConsumed = simulation.value.unitsConsumed;

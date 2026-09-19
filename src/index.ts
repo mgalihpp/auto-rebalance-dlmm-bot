@@ -37,6 +37,7 @@ import {
 	configValueKeyboard,
 	confirmInlineKeyboard,
 	escapeHtml,
+	formatCommandError,
 	formatConfigBadValue,
 	formatConfigPick,
 	formatConfigPreview,
@@ -507,9 +508,21 @@ function handleBotCommand(command: BotCommand) {
 			return _exhaustive;
 		}),
 		(error) =>
-			Effect.sync(() => {
+			Effect.gen(function* () {
 				const message = error instanceof Error ? error.message : String(error);
-				console.warn(`[${nowStamp()}] Telegram command failed: ${message}`);
+				yield* Effect.sync(() =>
+					console.warn(`[${nowStamp()}] Telegram command failed: ${message}`),
+				);
+				// Console-only failures are invisible in chat. Reply so /status
+				// and /rebalance errors (e.g. no funded position in this pool)
+				// surface in Telegram. Never fails the caller.
+				const exit = yield* Effect.exit(AppConfig);
+				if (exit._tag === "Success") {
+					yield* notifyTelegramText(
+						formatCommandError(message),
+						exit.value.telegram,
+					);
+				}
 			}),
 	);
 }
@@ -619,9 +632,18 @@ function drainPendingConfirm() {
 			});
 		}),
 		(error) =>
-			Effect.sync(() => {
+			Effect.gen(function* () {
 				const message = error instanceof Error ? error.message : String(error);
-				console.warn(`[${nowStamp()}] Telegram command failed: ${message}`);
+				yield* Effect.sync(() =>
+					console.warn(`[${nowStamp()}] Telegram command failed: ${message}`),
+				);
+				const exit = yield* Effect.exit(AppConfig);
+				if (exit._tag === "Success") {
+					yield* notifyTelegramText(
+						formatCommandError(message),
+						exit.value.telegram,
+					);
+				}
 			}),
 	);
 }

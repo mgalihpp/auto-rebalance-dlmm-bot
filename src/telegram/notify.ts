@@ -342,6 +342,21 @@ export function formatTelegramMessage(event: TelegramEvent): string {
 	return format(event);
 }
 
+// Reply for a chat command that threw (e.g. loadPositionState with no funded
+// position). Callers log the raw error and send this text so the failure is
+// visible in Telegram instead of console-only.
+export function formatCommandError(message: string): string {
+	const trimmed = message.slice(0, 1000);
+	if (message.includes("no DLMM position found")) {
+		return (
+			`❌ <b>No position found</b>\n<code>${escapeHtml(trimmed)}</code>\n\n` +
+			`Wallet has no funded position in this pool. Check <code>POOL_ADDRESS</code> with <code>/config</code> then retry <code>/status</code>, ` +
+			`and make sure the wallet holds a DLMM position in that pool.`
+		);
+	}
+	return `❌ <b>Command failed</b>\n<code>${escapeHtml(trimmed)}</code>`;
+}
+
 // Minimal structural subset of fetch Response so tests can inject a fake
 // without touching the network. Compatible with globalThis.fetch.
 export interface TelegramHttpResponse {

@@ -6,6 +6,8 @@ import {
 	isRetryableSimulationError,
 	parsePriorityFeeEstimate,
 	SendError,
+	SIM_BLOCKHASH_COMMITMENT,
+	SIM_RETRY_DELAY_MS,
 } from "../src/rebalance/send.ts";
 
 describe("computeUnitLimitWithBuffer", () => {
@@ -64,6 +66,17 @@ describe("isRetryableSimulationError", () => {
 		expect(isRetryableSimulationError("InstructionError")).toBe(false);
 		expect(isRetryableSimulationError(null)).toBe(false);
 		expect(isRetryableSimulationError(undefined)).toBe(false);
+	});
+});
+
+describe("simulation blockhash tunables", () => {
+	test("sim uses finalized so any load-balanced node knows the hash", () => {
+		expect(SIM_BLOCKHASH_COMMITMENT).toBe("finalized");
+	});
+
+	test("retry delay is positive so a lagging node can catch up", () => {
+		expect(Number.isInteger(SIM_RETRY_DELAY_MS)).toBe(true);
+		expect(SIM_RETRY_DELAY_MS).toBeGreaterThan(0);
 	});
 });
 

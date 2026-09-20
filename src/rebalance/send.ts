@@ -46,6 +46,16 @@ export const DEFAULT_PRIORITY_LEVEL: PrioritySetting = "High";
 export const DEFAULT_POLL_MS = 1000;
 export const DEFAULT_RESEND_MS = 2500;
 export const MAX_SEND_ATTEMPTS = 3;
+// Simulation-only blockhash commitment. "finalized" is older than "confirmed"
+// but known to every RPC node, so a load-balanced simulate call never sees a
+// "too new" BlockhashNotFound (Helius blockhash-errors blog, "Mismatched
+// RPCs" case; Solana cookbook "Be wary of lagging RPC nodes"). The throwaway
+// simTx is discarded after CU estimation; the real finalTx below still uses a
+// fresh "confirmed" blockhash.
+// Delay between simulation-blockhash retries so a lagging node can catch up
+// instead of failing 3x within the same second.
+export const SIM_BLOCKHASH_COMMITMENT = "finalized" as const;
+export const SIM_RETRY_DELAY_MS = 1000;
 
 export interface SendManualInput {
 	tx: Transaction;
@@ -251,8 +261,10 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 
 				let lastSignature: string | undefined;
 				const sendOnce = async (attempt: number): Promise<string> => {
+					// Throwaway CU-estimation tx: finalized blockhash is universally
+					// known, so any node in a load-balanced pool can simulate it.
 					const simBlockhash = (
-						await connection.getLatestBlockhash("confirmed")
+						await connection.getLatestBlockhash(SIM_BLOCKHASH_COMMITMENT)
 					).blockhash;
 					const simTx = new Transaction().add(
 						ComputeBudgetProgram.setComputeUnitLimit({
@@ -407,6 +419,9 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 						console.warn(
 							`[${nowStamp()}] [${label}] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error instanceof Error ? error.message : String(error)}`,
 						);
+						// Give a lagging RPC node time to catch up before the next
+						// attempt fetches a fresh blockhash.
+						await sleep(SIM_RETRY_DELAY_MS);
 					}
 				}
 				throw new SendError({

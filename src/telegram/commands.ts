@@ -24,6 +24,8 @@ export class TelegramPollError extends Data.TaggedError("TelegramPollError")<{
 export type BotCommand =
 	| { kind: "status"; chatId: string; updateId: number; callbackId?: string }
 	| { kind: "help"; chatId: string; updateId: number; callbackId?: string }
+	| { kind: "pause"; chatId: string; updateId: number; callbackId?: string }
+	| { kind: "resume"; chatId: string; updateId: number; callbackId?: string }
 	| {
 			kind: "rebalance";
 			chatId: string;
@@ -301,7 +303,7 @@ export function parseConfigMenuAction(data: string): ConfigMenuAction | null {
 }
 
 export const TELEGRAM_HELP_TEXT =
-	"DLMM bot commands (atau pakai tombol menu di bawah):\n/status - show position snapshot (read-only)\n/help - show this help\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
+	"DLMM bot commands (or use the menu buttons below):\n/status - show position snapshot (read-only)\n/help - show this help\n/pause (or /stop) - pause auto-rebalance loop, Telegram stays responsive\n/resume (or /start) - resume auto-rebalance loop\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
 
 // Menu button labels resolve to the same commands as their slash equivalents.
 const MENU_LABELS: Record<string, BotCommand["kind"]> = {
@@ -309,6 +311,13 @@ const MENU_LABELS: Record<string, BotCommand["kind"]> = {
 	status: "status",
 	"❓ help": "help",
 	help: "help",
+	"⏸ pause": "pause",
+	pause: "pause",
+	"⏸️ pause": "pause",
+	stop: "pause",
+	"▶️ resume": "resume",
+	resume: "resume",
+	start: "resume",
 	"👁 preview": "rebalance",
 	preview: "rebalance",
 	"✅ confirm": "rebalance",
@@ -320,6 +329,10 @@ const MENU_LABELS: Record<string, BotCommand["kind"]> = {
 const CALLBACK_DATA: Record<string, BotCommand["kind"]> = {
 	status: "status",
 	help: "help",
+	pause: "pause",
+	stop: "pause",
+	resume: "resume",
+	start: "resume",
 	rebalance_preview: "rebalance",
 	rebalance: "rebalance",
 	rebalance_confirm: "rebalance",
@@ -345,6 +358,12 @@ function commandFromMenuLabel(
 	}
 	if (kind === "config_show") {
 		return { kind: "config_show", chatId, updateId: id, callbackId };
+	}
+	if (kind === "pause") {
+		return { kind: "pause", chatId, updateId: id, callbackId };
+	}
+	if (kind === "resume") {
+		return { kind: "resume", chatId, updateId: id, callbackId };
 	}
 	return {
 		kind: "rebalance",
@@ -403,6 +422,22 @@ export function parseBotCommand(
 		if (kind === "config_show") {
 			return {
 				kind: "config_show",
+				chatId: allowedChatId,
+				updateId: id,
+				callbackId,
+			};
+		}
+		if (kind === "pause") {
+			return {
+				kind: "pause",
+				chatId: allowedChatId,
+				updateId: id,
+				callbackId,
+			};
+		}
+		if (kind === "resume") {
+			return {
+				kind: "resume",
 				chatId: allowedChatId,
 				updateId: id,
 				callbackId,
@@ -486,6 +521,12 @@ export function parseBotCommand(
 	}
 	if (base === "/help") {
 		return { kind: "help", chatId: allowedChatId, updateId: id };
+	}
+	if (base === "/pause" || base === "/stop") {
+		return { kind: "pause", chatId: allowedChatId, updateId: id };
+	}
+	if (base === "/resume" || base === "/start") {
+		return { kind: "resume", chatId: allowedChatId, updateId: id };
 	}
 	if (base === "/rebalance") {
 		const confirmed = (parts[1] ?? "").toLowerCase() === "confirm";
@@ -592,6 +633,19 @@ export function nextUpdatesOffset(
 // so two live executes can never overlap. Single slot: a second confirm
 // overwrites the first. Pure in-memory, never touches the network.
 let pendingLiveConfirm: Extract<BotCommand, { kind: "rebalance" }> | undefined;
+
+// Telegram stays responsive while paused: /status and /rebalance preview
+// still run, only the main-loop check and queued live executes are gated.
+// Ephemeral in-memory, never persisted.
+let botPaused = false;
+
+export function isBotPaused(): boolean {
+	return botPaused;
+}
+
+export function setBotPaused(value: boolean): void {
+	botPaused = value;
+}
 
 // True only for the live path: a confirmed /rebalance that may actually send.
 // DRY_RUN=true confirms stay preview-only and run immediately in the fast loop.

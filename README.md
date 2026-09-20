@@ -120,6 +120,8 @@ The bot replies within one `TELEGRAM_POLL_INTERVAL_MS`.
 
 - `/status`. Read-only position snapshot.
 - `/help`. List commands.
+- `/pause` (or `/stop`). Pause auto-rebalance loop, Telegram stays responsive.
+- `/resume` (or `/start`). Resume auto-rebalance loop.
 - `/rebalance`. Preview only, never sends.
 - `/rebalance confirm`. Queue a live run. It runs serialized with the main loop, and still only previews while `DRY_RUN=true`.
 

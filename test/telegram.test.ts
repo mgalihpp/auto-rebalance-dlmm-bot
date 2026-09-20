@@ -20,12 +20,14 @@ import {
 	type EditableKey,
 	fetchTelegramUpdates,
 	hasPendingLiveConfirm,
+	isBotPaused,
 	isEditableKey,
 	nextUpdatesOffset,
 	normalizeEditableKey,
 	parseBotCommand,
 	parseConfigMenuAction,
 	queuePendingLiveConfirm,
+	setBotPaused,
 	shouldDeferLiveConfirm,
 	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
@@ -40,6 +42,9 @@ import {
 	formatConfigShow,
 	formatConfigUnknownKey,
 	formatConfigUpdated,
+	formatPausedReply,
+	formatPausedSkip,
+	formatResumedReply,
 	formatTelegramMessage,
 	notifyTelegramEvent,
 	notifyTelegramText,
@@ -990,10 +995,16 @@ describe("config UX wiring", () => {
 		const { TELEGRAM_HELP_TEXT } = await import("../src/telegram/commands.ts");
 		expect(TELEGRAM_HELP_TEXT).toContain("/config");
 		expect(TELEGRAM_HELP_TEXT).toContain("POOL_ADDRESS");
+		expect(TELEGRAM_HELP_TEXT).toContain("/pause");
+		expect(TELEGRAM_HELP_TEXT).toContain("/resume");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("pause");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("resume");
 		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
 		expect(labels).toContain("⚙️ Config");
-		expect(labels.length).toBe(5);
+		expect(labels).toContain("⏸ Pause");
+		expect(labels).toContain("▶️ Resume");
+		expect(labels.length).toBe(7);
 	});
 });
 
@@ -1472,5 +1483,91 @@ describe("config menu help sync", () => {
 		});
 		expect(hostile).not.toContain("<evil>");
 		expect(hostile).toContain("&lt;evil&gt;");
+	});
+});
+
+describe("pause and resume commands", () => {
+	const allowed = "987654";
+
+	test("parses /pause and /stop as pause", () => {
+		expect(parseBotCommand(makeUpdate(401, 987654, "/pause"), allowed)).toEqual(
+			{
+				kind: "pause",
+				chatId: allowed,
+				updateId: 401,
+			},
+		);
+		expect(parseBotCommand(makeUpdate(402, 987654, "/stop"), allowed)).toEqual({
+			kind: "pause",
+			chatId: allowed,
+			updateId: 402,
+		});
+		expect(
+			parseBotCommand(makeUpdate(403, 987654, "/pause@MyBot"), allowed)?.kind,
+		).toBe("pause");
+	});
+
+	test("parses /resume and /start as resume", () => {
+		expect(
+			parseBotCommand(makeUpdate(404, 987654, "/resume"), allowed),
+		).toEqual({
+			kind: "resume",
+			chatId: allowed,
+			updateId: 404,
+		});
+		expect(parseBotCommand(makeUpdate(405, 987654, "/start"), allowed)).toEqual(
+			{
+				kind: "resume",
+				chatId: allowed,
+				updateId: 405,
+			},
+		);
+		expect(
+			parseBotCommand(makeUpdate(406, 987654, "/start@MyBot"), allowed)?.kind,
+		).toBe("resume");
+	});
+
+	test("menu labels and callbacks round-trip to pause and resume", () => {
+		expect(
+			parseBotCommand(makeUpdate(407, 987654, "⏸ Pause"), allowed)?.kind,
+		).toBe("pause");
+		expect(
+			parseBotCommand(makeUpdate(408, 987654, "▶️ Resume"), allowed)?.kind,
+		).toBe("resume");
+		expect(
+			parseBotCommand(makeUpdate(409, 987654, "stop"), allowed)?.kind,
+		).toBe("pause");
+		expect(
+			parseBotCommand(makeUpdate(410, 987654, "start"), allowed)?.kind,
+		).toBe("resume");
+		expect(
+			parseBotCommand(makeCallback(411, 987654, "pause"), allowed),
+		).toMatchObject({ kind: "pause" });
+		expect(
+			parseBotCommand(makeCallback(412, 987654, "resume"), allowed),
+		).toMatchObject({ kind: "resume" });
+		expect(
+			parseBotCommand(makeCallback(413, 987654, "stop"), allowed),
+		).toMatchObject({ kind: "pause" });
+		expect(
+			parseBotCommand(makeCallback(414, 987654, "start"), allowed),
+		).toMatchObject({ kind: "resume" });
+	});
+
+	test("pause state toggles in memory only", () => {
+		setBotPaused(false);
+		expect(isBotPaused()).toBe(false);
+		setBotPaused(true);
+		expect(isBotPaused()).toBe(true);
+		setBotPaused(false);
+		expect(isBotPaused()).toBe(false);
+	});
+
+	test("pause and resume replies mention the opposite command", () => {
+		expect(formatPausedReply(false)).toContain("/resume");
+		expect(formatPausedReply(true)).toContain("Already paused");
+		expect(formatResumedReply(false)).toContain("/pause");
+		expect(formatResumedReply(true)).toContain("Already running");
+		expect(formatPausedSkip()).toContain("/resume");
 	});
 });

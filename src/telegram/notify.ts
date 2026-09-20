@@ -51,6 +51,7 @@ export const TELEGRAM_MAIN_MENU = {
 	keyboard: [
 		[{ text: "📊 Status" }, { text: "👁 Preview" }],
 		[{ text: "✅ Confirm" }, { text: "❓ Help" }],
+		[{ text: "⏸ Pause" }, { text: "▶️ Resume" }],
 		[{ text: "⚙️ Config" }],
 	],
 	resize_keyboard: true,
@@ -60,6 +61,8 @@ export const TELEGRAM_MAIN_MENU = {
 export const TELEGRAM_BOT_COMMANDS = [
 	{ command: "status", description: "show position snapshot (read-only)" },
 	{ command: "help", description: "show help" },
+	{ command: "pause", description: "pause auto-rebalance loop" },
+	{ command: "resume", description: "resume auto-rebalance loop" },
 	{ command: "rebalance", description: "preview rebalance (no transactions)" },
 	{
 		command: "config",
@@ -201,6 +204,22 @@ export function formatStatusReply(snapshot: PositionSnapshot): string {
 
 export function formatInRangeReply(snapshot: PositionSnapshot): string {
 	return `✅ <b>In range</b> — no rebalance needed.\n${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))} within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`;
+}
+
+export function formatPausedReply(already: boolean): string {
+	return already
+		? `⏸ <b>Already paused.</b>\nAuto-rebalance loop stays paused. /status remains available. Send <code>/resume</code> to continue.`
+		: `⏸ <b>Paused.</b>\nAuto-rebalance loop paused. No checks and no live executes until resume. /status remains available. Send <code>/resume</code> to continue.`;
+}
+
+export function formatResumedReply(already: boolean): string {
+	return already
+		? `▶️ <b>Already running.</b>\nAuto-rebalance loop is active. Send <code>/pause</code> to pause.`
+		: `▶️ <b>Resumed.</b>\nAuto-rebalance loop active again. Send <code>/pause</code> to pause.`;
+}
+
+export function formatPausedSkip(): string {
+	return `⏸ <b>Paused</b> — skipping rebalance check.\nSend <code>/resume</code> to continue the loop.`;
 }
 
 export interface ConfigShowEntry {

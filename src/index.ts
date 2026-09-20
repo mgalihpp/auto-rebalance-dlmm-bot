@@ -23,10 +23,12 @@ import {
 	EDITABLE_KEYS,
 	EDITABLE_REGISTRY,
 	fetchTelegramUpdates,
+	isBotPaused,
 	nextUpdatesOffset,
 	normalizeEditableKey,
 	parseBotCommand,
 	queuePendingLiveConfirm,
+	setBotPaused,
 	shouldDeferLiveConfirm,
 	TELEGRAM_HELP_TEXT,
 	takePendingLiveConfirm,
@@ -45,7 +47,10 @@ import {
 	formatConfigUnknownKey,
 	formatConfigUpdated,
 	formatInRangeReply,
+	formatPausedReply,
+	formatPausedSkip,
 	formatPreviewReply,
+	formatResumedReply,
 	formatStatusReply,
 	notifyTelegramEvent,
 	notifyTelegramText,
@@ -198,6 +203,10 @@ await Effect.runPromise(
 
 function runIteration() {
 	return Effect.gen(function* () {
+		if (isBotPaused()) {
+			console.log(`[${nowStamp()}] ${formatPausedSkip()}`);
+			return;
+		}
 		const config = yield* AppConfig;
 		const tunables = yield* getTunables();
 		const state = yield* loadPositionState({
@@ -316,6 +325,20 @@ function handleBotCommand(command: BotCommand) {
 				yield* replyText(
 					`<b>Unknown command</b>\n<code>${escapeHtml(command.text)}</code>\n\n${TELEGRAM_HELP_TEXT}`,
 				);
+				return;
+			}
+			if (command.kind === "pause") {
+				const already = isBotPaused();
+				setBotPaused(true);
+				console.log(`[${nowStamp()}] Bot paused via Telegram command.`);
+				yield* replyText(formatPausedReply(already));
+				return;
+			}
+			if (command.kind === "resume") {
+				const already = !isBotPaused();
+				setBotPaused(false);
+				console.log(`[${nowStamp()}] Bot resumed via Telegram command.`);
+				yield* replyText(formatResumedReply(already));
 				return;
 			}
 			if (command.kind === "config_show") {
@@ -441,7 +464,12 @@ function handleBotCommand(command: BotCommand) {
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
-				yield* replyText(formatStatusReply(snapshot));
+				const base = formatStatusReply(snapshot);
+				yield* replyText(
+					isBotPaused()
+						? `${base}\n\n⏸ <b>Paused.</b> Send <code>/resume</code> to continue.`
+						: base,
+				);
 				return;
 			}
 			if (command.kind === "rebalance") {
@@ -561,6 +589,10 @@ function drainTelegramCommands() {
 function drainPendingConfirm() {
 	return Effect.catch(
 		Effect.gen(function* () {
+			if (isBotPaused()) {
+				console.log(`[${nowStamp()}] Paused — holding queued live confirm.`);
+				return;
+			}
 			const pending = takePendingLiveConfirm();
 			if (!pending) {
 				return;

@@ -5,9 +5,11 @@ import {
 	computeUnitLimitWithBuffer,
 	isRetryableSimulationError,
 	parsePriorityFeeEstimate,
+	resolveCuLimit,
 	SendError,
 	SIM_BLOCKHASH_COMMITMENT,
 	SIM_RETRY_DELAY_MS,
+	SWAP_CU_MIN_LIMIT,
 } from "../src/rebalance/send.ts";
 
 describe("computeUnitLimitWithBuffer", () => {
@@ -31,6 +33,32 @@ describe("computeUnitLimitWithBuffer", () => {
 		expect(() => computeUnitLimitWithBuffer(Number.NaN)).toThrow(SendError);
 		expect(() => computeUnitLimitWithBuffer(1000, 0)).toThrow(SendError);
 		expect(() => computeUnitLimitWithBuffer(1000, -1)).toThrow(SendError);
+	});
+});
+
+describe("resolveCuLimit", () => {
+	test("clamps small swap sims up to the swap floor", () => {
+		// Regression: sim 40166 * 1.5 = 60249 still failed on-chain.
+		expect(resolveCuLimit(40166, 1.5, SWAP_CU_MIN_LIMIT)).toBe(
+			SWAP_CU_MIN_LIMIT,
+		);
+		expect(SWAP_CU_MIN_LIMIT).toBe(400_000);
+	});
+
+	test("keeps the buffered value when it already clears the floor", () => {
+		expect(resolveCuLimit(500_000, 1.5, SWAP_CU_MIN_LIMIT)).toBe(
+			Math.ceil(500_000 * 1.5),
+		);
+	});
+
+	test("behaves like computeUnitLimitWithBuffer without a floor", () => {
+		expect(resolveCuLimit(1000)).toBe(1100);
+	});
+
+	test("rejects an out-of-range floor", () => {
+		expect(() => resolveCuLimit(1000, 1.1, 0)).toThrow(SendError);
+		expect(() => resolveCuLimit(1000, 1.1, 1_400_001)).toThrow(SendError);
+		expect(() => resolveCuLimit(1000, 1.1, 1.5)).toThrow(SendError);
 	});
 });
 

@@ -27,7 +27,11 @@ import {
 	SolanaConnection,
 } from "../services.ts";
 import { formatSig, nowStamp } from "../utils.ts";
-import { SWAP_CU_BUFFER_MULTIPLIER, sendManualTransaction } from "./send.ts";
+import {
+	SWAP_CU_BUFFER_MULTIPLIER,
+	SWAP_CU_MIN_LIMIT,
+	sendManualTransaction,
+} from "./send.ts";
 import { type StrategyKind, toStrategyType } from "./types.ts";
 
 export class ZapError extends Data.TaggedError("ZapError")<{
@@ -150,6 +154,7 @@ function sendZapTx(
 	tx: Transaction,
 	label: string,
 	cuBufferMultiplier?: number,
+	cuMinLimit?: number,
 ): Effect.Effect<
 	string,
 	ZapError,
@@ -164,6 +169,7 @@ function sendZapTx(
 				label,
 				priorityLevel: tunables.priorityLevel,
 				cuBufferMultiplier,
+				cuMinLimit,
 			}),
 			(error) => toZapError(error),
 		);
@@ -376,6 +382,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 			tx,
 			label,
 			label === "swap" ? SWAP_CU_BUFFER_MULTIPLIER : undefined,
+			label === "swap" ? SWAP_CU_MIN_LIMIT : undefined,
 		);
 	}
 	const topUp = yield* executeCompoundTopUp(input.compound);

@@ -10,6 +10,10 @@ import { Effect } from "effect";
 import { loadPositionState } from "../src/rebalance/dlmm.ts";
 import { originalHalfRange } from "../src/rebalance/plan.ts";
 import {
+	planSweepLegs,
+	type ReaccumulateInput,
+} from "../src/rebalance/reaccumulate.ts";
+import {
 	type CompoundFeesInput,
 	describeZapSwap,
 	executeZapRebalance,
@@ -82,8 +86,39 @@ const main = Effect.gen(function* () {
 			`[${nowStamp()}] Compound fees: enabled — no claimable fees to top up`,
 		);
 	}
+	const reaccumulate: ReaccumulateInput = {
+		enabled: botConfig.reaccumulateFeesToSol,
+		poolAddress: botConfig.poolAddress,
+		feeX: snapshot.feeX,
+		feeY: snapshot.feeY,
+		slippageBps: botConfig.slippageBps,
+		jupiterApiKey: botConfig.jupiterApiKey,
+	};
+	if (!reaccumulate.enabled) {
+		console.log(`[${nowStamp()}] Reaccumulate to SOL: disabled`);
+	} else if (!reaccumulate.feeX.isZero() || !reaccumulate.feeY.isZero()) {
+		const legs = planSweepLegs({
+			feeX: reaccumulate.feeX,
+			feeY: reaccumulate.feeY,
+			balX: reaccumulate.feeX,
+			balY: reaccumulate.feeY,
+			mintX: snapshot.tokenXMint,
+			mintY: snapshot.tokenYMint,
+		});
+		const detail =
+			legs === null
+				? "no sweepable fees"
+				: legs.map((leg) => `${leg.kind} ${leg.amount.toString()}`).join(", ");
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — ${detail} after zap (capped by wallet balance)`,
+		);
+	} else {
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — no claimable fees to sweep`,
+		);
+	}
 
-	const done = yield* executeZapRebalance({ plan, compound });
+	const done = yield* executeZapRebalance({ plan, compound, reaccumulate });
 	console.log(
 		`[${nowStamp()}] Rebalanced via zap position ${snapshot.position}: ${formatSig(done.signature)}`,
 	);

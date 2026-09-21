@@ -19,6 +19,7 @@ export interface BotConfig {
 	slippageBps: number;
 	dryRun: boolean;
 	compoundFees: boolean;
+	reaccumulateFeesToSol: boolean;
 	strategy: StrategyKind;
 	priorityLevel: PrioritySetting;
 	jupiterApiKey?: string;
@@ -52,6 +53,7 @@ export type Tunables = Pick<
 	| "telegramPollIntervalMs"
 	| "strategy"
 	| "compoundFees"
+	| "reaccumulateFeesToSol"
 	| "priorityLevel"
 >;
 
@@ -63,6 +65,7 @@ export function tunablesFromConfig(config: BotConfig): Tunables {
 		telegramPollIntervalMs: config.telegramPollIntervalMs,
 		strategy: config.strategy,
 		compoundFees: config.compoundFees,
+		reaccumulateFeesToSol: config.reaccumulateFeesToSol,
 		priorityLevel: config.priorityLevel,
 	};
 }
@@ -283,6 +286,20 @@ export function parseCompoundFeesValue(
 	return parseBoolVar("COMPOUND_FEES", trimmed, false);
 }
 
+export function parseReaccumulateFeesToSolValue(
+	raw: string,
+): Effect.Effect<boolean, ConfigError> {
+	const trimmed = raw.trim();
+	if (trimmed === "") {
+		return Effect.fail(
+			new ConfigError({
+				message: `invalid REACCUMULATE_FEES_TO_SOL: expected true/false, got "${raw}"`,
+			}),
+		);
+	}
+	return parseBoolVar("REACCUMULATE_FEES_TO_SOL", trimmed, false);
+}
+
 export function parsePriorityLevelValue(
 	raw: string,
 ): Effect.Effect<PrioritySetting, ConfigError> {
@@ -366,6 +383,17 @@ export function loadConfig(
 			optional("COMPOUND_FEES", env),
 			false,
 		);
+		const reaccumulateFeesToSol = yield* parseBoolVar(
+			"REACCUMULATE_FEES_TO_SOL",
+			optional("REACCUMULATE_FEES_TO_SOL", env),
+			false,
+		);
+		if (compoundFees && reaccumulateFeesToSol) {
+			return yield* new ConfigError({
+				message:
+					"invalid config: COMPOUND_FEES and REACCUMULATE_FEES_TO_SOL are mutually exclusive; enable at most one",
+			});
+		}
 		const strategy = yield* parseStrategyVar(
 			"STRATEGY",
 			optional("STRATEGY", env),
@@ -412,6 +440,7 @@ export function loadConfig(
 			slippageBps,
 			dryRun,
 			compoundFees,
+			reaccumulateFeesToSol,
 			strategy,
 			priorityLevel,
 			jupiterApiKey,

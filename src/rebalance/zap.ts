@@ -27,6 +27,10 @@ import {
 	SolanaConnection,
 } from "../services.ts";
 import { formatSig, nowStamp } from "../utils.ts";
+import {
+	executeReaccumulateToSol,
+	type ReaccumulateInput,
+} from "./reaccumulate.ts";
 import { SWAP_CU_BUFFER_MULTIPLIER, sendManualTransaction } from "./send.ts";
 import { type StrategyKind, toStrategyType } from "./types.ts";
 
@@ -54,6 +58,7 @@ export interface ZapPlan {
 export interface ZapExecuteInput {
 	plan: ZapPlan;
 	compound: CompoundFeesInput;
+	reaccumulate: ReaccumulateInput;
 }
 
 // Opt-in redeposit of the fees the zap claims to the user ATAs. The zap
@@ -378,8 +383,18 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 			label === "swap" ? SWAP_CU_BUFFER_MULTIPLIER : undefined,
 		);
 	}
-	const topUp = yield* executeCompoundTopUp(input.compound);
-	return { signature: topUp ?? last };
+	// Startup config rejects both flags; at runtime reaccumulate wins.
+	let topUp: string | null = null;
+	if (input.reaccumulate.enabled && input.compound.enabled) {
+		console.log(
+			`[${nowStamp()}] Compound fees skipped: reaccumulate-to-SOL takes precedence.`,
+		);
+	}
+	if (!input.reaccumulate.enabled) {
+		topUp = yield* executeCompoundTopUp(input.compound);
+	}
+	const sweep = yield* executeReaccumulateToSol(input.reaccumulate);
+	return { signature: sweep ?? topUp ?? last };
 });
 
 export function describeZapSwap(estimate: DlmmDirectRebalanceEstimate): string {

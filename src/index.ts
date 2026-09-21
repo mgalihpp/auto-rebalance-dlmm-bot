@@ -4,6 +4,10 @@ import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
+	planSweepLegs,
+	type ReaccumulateInput,
+} from "./rebalance/reaccumulate.ts";
+import {
 	type CompoundFeesInput,
 	describeZapSwap,
 	executeZapRebalance,
@@ -76,8 +80,11 @@ function printPreview(
 		activeBinId: number;
 		lowerBinId: number;
 		upperBinId: number;
+		tokenXMint: string;
+		tokenYMint: string;
 	},
 	compound: CompoundFeesInput,
+	reaccumulate: ReaccumulateInput,
 ) {
 	const result = plan.estimate.result;
 	console.log(`[${nowStamp()}] === DLMM auto-rebalance preview (zap) ===`);
@@ -109,6 +116,35 @@ function printPreview(
 	} else {
 		console.log(
 			`[${nowStamp()}] Compound fees:  enabled — no claimable fees to top up`,
+		);
+	}
+	if (!reaccumulate.enabled) {
+		console.log(`[${nowStamp()}] Reaccumulate to SOL: disabled`);
+	} else if (!reaccumulate.feeX.isZero() || !reaccumulate.feeY.isZero()) {
+		// Preview has no wallet balance yet; execution re-caps by real balance.
+		const legs = planSweepLegs({
+			feeX: reaccumulate.feeX,
+			feeY: reaccumulate.feeY,
+			balX: reaccumulate.feeX,
+			balY: reaccumulate.feeY,
+			mintX: snapshot.tokenXMint,
+			mintY: snapshot.tokenYMint,
+		});
+		const detail =
+			legs === null
+				? "no sweepable fees"
+				: legs
+						.map(
+							(leg) =>
+								`${leg.kind} ${formatBn(leg.amount)} ${shortAddr(leg.mint)}`,
+						)
+						.join(", ");
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — ${detail} after zap (capped by wallet balance)`,
+		);
+	} else {
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — no claimable fees to sweep`,
 		);
 	}
 }
@@ -248,6 +284,14 @@ function runIteration() {
 			strategy: tunables.strategy,
 			slippageBps: tunables.slippageBps,
 		};
+		const reaccumulate: ReaccumulateInput = {
+			enabled: tunables.reaccumulateFeesToSol,
+			poolAddress: tunables.poolAddress,
+			feeX: snapshot.feeX,
+			feeY: snapshot.feeY,
+			slippageBps: tunables.slippageBps,
+			jupiterApiKey: config.jupiterApiKey,
+		};
 		printPreview(
 			plan,
 			{
@@ -256,8 +300,11 @@ function runIteration() {
 				activeBinId: snapshot.activeBinId,
 				lowerBinId: snapshot.lowerBinId,
 				upperBinId: snapshot.upperBinId,
+				tokenXMint: snapshot.tokenXMint,
+				tokenYMint: snapshot.tokenYMint,
 			},
 			compound,
+			reaccumulate,
 		);
 		yield* notify({
 			kind: "rebalanceNeeded",
@@ -288,7 +335,7 @@ function runIteration() {
 			return;
 		}
 
-		const done = yield* executeZapRebalance({ plan, compound });
+		const done = yield* executeZapRebalance({ plan, compound, reaccumulate });
 		console.log(
 			`[${nowStamp()}] Rebalanced via zap position ${snapshot.position}: ${formatSig(done.signature)}`,
 		);
@@ -641,6 +688,14 @@ function drainPendingConfirm() {
 				strategy: tunables.strategy,
 				slippageBps: tunables.slippageBps,
 			};
+			const reaccumulate: ReaccumulateInput = {
+				enabled: tunables.reaccumulateFeesToSol,
+				poolAddress: tunables.poolAddress,
+				feeX: snapshot.feeX,
+				feeY: snapshot.feeY,
+				slippageBps: tunables.slippageBps,
+				jupiterApiKey: config.jupiterApiKey,
+			};
 			printPreview(
 				plan,
 				{
@@ -649,10 +704,13 @@ function drainPendingConfirm() {
 					activeBinId: snapshot.activeBinId,
 					lowerBinId: snapshot.lowerBinId,
 					upperBinId: snapshot.upperBinId,
+					tokenXMint: snapshot.tokenXMint,
+					tokenYMint: snapshot.tokenYMint,
 				},
 				compound,
+				reaccumulate,
 			);
-			const done = yield* executeZapRebalance({ plan, compound });
+			const done = yield* executeZapRebalance({ plan, compound, reaccumulate });
 			console.log(
 				`[${nowStamp()}] Rebalanced via chat command position ${snapshot.position}: ${formatSig(done.signature)}`,
 			);

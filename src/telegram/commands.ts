@@ -6,6 +6,7 @@ import {
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
+	parseReaccumulateFeesToSolValue,
 	parseSlippageBpsValue,
 	parseStrategyValue,
 	parseTelegramPollIntervalValue,
@@ -74,6 +75,7 @@ export type EditableKey =
 	| "TELEGRAM_POLL_INTERVAL_MS"
 	| "STRATEGY"
 	| "COMPOUND_FEES"
+	| "REACCUMULATE_FEES_TO_SOL"
 	| "PRIORITY_LEVEL"
 	| "POOL_ADDRESS";
 
@@ -83,6 +85,7 @@ export const EDITABLE_KEYS: readonly EditableKey[] = [
 	"TELEGRAM_POLL_INTERVAL_MS",
 	"STRATEGY",
 	"COMPOUND_FEES",
+	"REACCUMULATE_FEES_TO_SOL",
 	"PRIORITY_LEVEL",
 	"POOL_ADDRESS",
 ];
@@ -200,6 +203,31 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 		needsConfirm: false,
 		sideEffect: "applies to the next rebalance",
 		getDisplay: (tunables) => (tunables.compoundFees ? "true" : "false"),
+		formatParsed: (parsed) =>
+			typeof parsed === "boolean" ? (parsed ? "true" : "false") : "invalid",
+		presets: ["true", "false"],
+	},
+	REACCUMULATE_FEES_TO_SOL: {
+		key: "REACCUMULATE_FEES_TO_SOL",
+		parse: (raw) =>
+			Effect.map(
+				parseReaccumulateFeesToSolValue(raw),
+				(value): unknown => value,
+			),
+		apply: (tunables, raw) =>
+			Effect.map(
+				parseReaccumulateFeesToSolValue(raw),
+				(reaccumulateFeesToSol) => ({
+					...tunables,
+					reaccumulateFeesToSol,
+				}),
+			),
+		describe: () => "true/false (also 1/0, yes/no)",
+		needsConfirm: false,
+		sideEffect:
+			"applies to the next rebalance; wins over COMPOUND_FEES when both are on",
+		getDisplay: (tunables) =>
+			tunables.reaccumulateFeesToSol ? "true" : "false",
 		formatParsed: (parsed) =>
 			typeof parsed === "boolean" ? (parsed ? "true" : "false") : "invalid",
 		presets: ["true", "false"],

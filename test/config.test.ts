@@ -207,6 +207,7 @@ describe("strict single-value parsers (Telegram registry reuse)", () => {
 		expect(Object.keys(tunables).sort()).toEqual(
 			[
 				"compoundFees",
+				"reaccumulateFeesToSol",
 				"pollIntervalMs",
 				"poolAddress",
 				"priorityLevel",

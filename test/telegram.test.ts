@@ -763,9 +763,10 @@ describe("parseBotCommand /config", () => {
 });
 
 describe("editable registry", () => {
-	test("covers exactly the seven editable keys", () => {
+	test("covers exactly the eight editable keys", () => {
 		const expected: EditableKey[] = [
 			"COMPOUND_FEES",
+			"REACCUMULATE_FEES_TO_SOL",
 			"POLL_INTERVAL_MS",
 			"POOL_ADDRESS",
 			"PRIORITY_LEVEL",

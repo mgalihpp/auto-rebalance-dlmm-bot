@@ -1,7 +1,12 @@
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
-import { PRIORITY_SETTINGS, type PrioritySetting } from "./rebalance/send.ts";
+import {
+	DEFAULT_JITO_BLOCK_ENGINE_URL,
+	JITO_MIN_TIP_LAMPORTS,
+	PRIORITY_SETTINGS,
+	type PrioritySetting,
+} from "./rebalance/send.ts";
 import type { StrategyKind } from "./rebalance/types.ts";
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
@@ -21,6 +26,9 @@ export interface BotConfig {
 	compoundFees: boolean;
 	strategy: StrategyKind;
 	priorityLevel: PrioritySetting;
+	jitoBundle: boolean;
+	jitoTipLamports: number;
+	jitoBlockEngineUrl: string;
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
 	pollIntervalMs: number;
@@ -41,6 +49,11 @@ export const POLL_INTERVAL_MS_DEFAULT = 60000;
 export const TELEGRAM_POLL_INTERVAL_MS_MIN = 1000;
 export const TELEGRAM_POLL_INTERVAL_MS_MAX = 60000;
 export const TELEGRAM_POLL_INTERVAL_MS_DEFAULT = 3000;
+// 0.0001 SOL: between the 75th and 95th landed-tip percentile
+// (bundles.jito.wtf/api/v1/bundles/tip_floor), fractions of a cent per
+// rebalance. Capped at 0.01 SOL against typos.
+export const JITO_TIP_LAMPORTS_DEFAULT = 100_000;
+export const JITO_TIP_LAMPORTS_MAX = 10_000_000;
 
 // Mutable runtime tunables: everything Telegram may edit. DRY_RUN, RPC_URL,
 // PRIVATE_KEY, TELEGRAM_* credentials and JUPITER_API_KEY stay startup-only.
@@ -104,6 +117,21 @@ function parseIntVar(
 		);
 	}
 	return Effect.succeed(parsed);
+}
+
+function httpUrl(
+	name: string,
+	raw: string,
+): Effect.Effect<string, ConfigError> {
+	try {
+		const url = new URL(raw);
+		if (url.protocol === "http:" || url.protocol === "https:") {
+			return Effect.succeed(raw);
+		}
+	} catch {}
+	return Effect.fail(
+		new ConfigError({ message: `invalid ${name}: expected http(s) URL` }),
+	);
 }
 
 function asPublicKey(
@@ -317,19 +345,7 @@ export function loadConfig(
 	env: EnvSource,
 ): Effect.Effect<BotConfig, ConfigError> {
 	return Effect.gen(function* () {
-		const rpcUrl = yield* required("RPC_URL", env);
-		try {
-			const url = new URL(rpcUrl);
-			if (url.protocol !== "http:" && url.protocol !== "https:") {
-				return yield* new ConfigError({
-					message: "invalid RPC_URL: expected http(s) URL",
-				});
-			}
-		} catch {
-			return yield* new ConfigError({
-				message: "invalid RPC_URL: expected http(s) URL",
-			});
-		}
+		const rpcUrl = yield* httpUrl("RPC_URL", yield* required("RPC_URL", env));
 
 		const poolRaw = yield* required("POOL_ADDRESS", env);
 		const poolKey = yield* asPublicKey("POOL_ADDRESS", poolRaw);
@@ -376,6 +392,22 @@ export function loadConfig(
 			optional("PRIORITY_LEVEL", env),
 			"High",
 		);
+		const jitoBundle = yield* parseBoolVar(
+			"JITO_BUNDLE",
+			optional("JITO_BUNDLE", env),
+			false,
+		);
+		const jitoTipLamports = yield* parseIntVar(
+			"JITO_TIP_LAMPORTS",
+			optional("JITO_TIP_LAMPORTS", env),
+			JITO_TIP_LAMPORTS_DEFAULT,
+			JITO_MIN_TIP_LAMPORTS,
+			JITO_TIP_LAMPORTS_MAX,
+		);
+		const jitoBlockEngineUrl = yield* httpUrl(
+			"JITO_BLOCK_ENGINE_URL",
+			optional("JITO_BLOCK_ENGINE_URL", env) ?? DEFAULT_JITO_BLOCK_ENGINE_URL,
+		);
 		const jupiterApiKey = optional("JUPITER_API_KEY", env);
 		const pollIntervalMs = yield* parseIntVar(
 			"POLL_INTERVAL_MS",
@@ -414,6 +446,9 @@ export function loadConfig(
 			compoundFees,
 			strategy,
 			priorityLevel,
+			jitoBundle,
+			jitoTipLamports,
+			jitoBlockEngineUrl,
 			jupiterApiKey,
 			secretKey,
 			pollIntervalMs,

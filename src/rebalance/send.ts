@@ -1,6 +1,8 @@
 import {
 	ComputeBudgetProgram,
+	PublicKey,
 	type SignatureStatus,
+	SystemProgram,
 	Transaction,
 	type TransactionInstruction,
 } from "@solana/web3.js";
@@ -459,3 +461,420 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 		});
 	},
 );
+
+// Jito bundle send (https://docs.jito.wtf/lowlatencytxnsend/): up to 5 legs
+// land in order, in one slot, all-or-nothing, so a zap can never stop
+// half-way with liquidity removed but not re-deposited. Only the tip buys
+// priority in the block-engine auction, so legs carry a sim-based CU limit
+// and no priority fee.
+export const MAX_BUNDLE_TXS = 5;
+export const JITO_MIN_TIP_LAMPORTS = 1000;
+export const DEFAULT_JITO_BLOCK_ENGINE_URL =
+	"https://mainnet.block-engine.jito.wtf";
+// Constant per Jito docs (getTipAccounts). Pick one at random to reduce
+// contention; never reference them through an address lookup table.
+export const JITO_TIP_ACCOUNTS = [
+	"96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+	"HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+	"Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+	"ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+	"DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+	"ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+	"DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+	"3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+] as const;
+
+export interface BundleLeg {
+	tx: Transaction;
+	label: string;
+	cuBufferMultiplier?: number;
+	cuMinLimit?: number;
+}
+
+export interface SendBundleInput {
+	legs: BundleLeg[];
+	tipLamports: number;
+	blockEngineUrl: string;
+	pollMs?: number;
+	resendMs?: number;
+}
+
+export function pickTipAccount(random: () => number = Math.random): PublicKey {
+	const index = Math.min(
+		Math.max(Math.floor(random() * JITO_TIP_ACCOUNTS.length), 0),
+		JITO_TIP_ACCOUNTS.length - 1,
+	);
+	return new PublicKey(JITO_TIP_ACCOUNTS[index] ?? JITO_TIP_ACCOUNTS[0]);
+}
+
+export type BundleSimulation =
+	| { ok: true; unitsConsumed: number[] }
+	| { ok: false; reason: string };
+
+// Reads a Jito-flavored simulateBundle payload (Helius exposes it on the
+// regular RPC URL). A plain Solana RPC answers with a method-not-found error.
+export function parseSimulateBundleResult(
+	payload: unknown,
+	legCount: number,
+): BundleSimulation {
+	if (typeof payload !== "object" || payload === null) {
+		return { ok: false, reason: "empty simulateBundle response" };
+	}
+	if ("error" in payload && payload.error) {
+		return {
+			ok: false,
+			reason: `simulateBundle rejected (RPC_URL must support it, e.g. Helius): ${JSON.stringify(payload.error)}`,
+		};
+	}
+	const value = (payload as { result?: { value?: unknown } }).result?.value;
+	if (typeof value !== "object" || value === null) {
+		return { ok: false, reason: "simulateBundle returned no result" };
+	}
+	const summary = (value as { summary?: unknown }).summary;
+	if (summary !== "succeeded") {
+		return {
+			ok: false,
+			reason: `bundle simulation failed: ${JSON.stringify(summary)}`,
+		};
+	}
+	const results = (value as { transactionResults?: unknown })
+		.transactionResults;
+	if (!Array.isArray(results) || results.length !== legCount) {
+		return {
+			ok: false,
+			reason: `simulateBundle returned ${Array.isArray(results) ? results.length : "no"} results for ${legCount} legs`,
+		};
+	}
+	const unitsConsumed: number[] = [];
+	for (const result of results) {
+		const units =
+			typeof result === "object" && result !== null && "unitsConsumed" in result
+				? result.unitsConsumed
+				: undefined;
+		if (typeof units !== "number" || !Number.isFinite(units) || units <= 0) {
+			return {
+				ok: false,
+				reason: "simulateBundle result is missing unitsConsumed",
+			};
+		}
+		unitsConsumed.push(units);
+	}
+	return { ok: true, unitsConsumed };
+}
+
+export type BundleLanding =
+	| { kind: "landed" }
+	| { kind: "failed"; index: number; err: string }
+	| { kind: "pending"; landed: number };
+
+// A bundle lands atomically, but an uncled block can rebroadcast single legs
+// outside it (Jito docs, "Uncled Blocks"). Any leg error, or some legs landed
+// at blockhash expiry, means the zap state is partial and must not be resent.
+export function classifyBundleLanding(
+	statuses: ReadonlyArray<SignatureStatus | null | undefined>,
+): BundleLanding {
+	let landed = 0;
+	for (const [index, status] of statuses.entries()) {
+		if (status?.err) {
+			return { kind: "failed", index, err: JSON.stringify(status.err) };
+		}
+		if (
+			status?.confirmationStatus === "confirmed" ||
+			status?.confirmationStatus === "finalized"
+		) {
+			landed++;
+		}
+	}
+	if (statuses.length > 0 && landed === statuses.length) {
+		return { kind: "landed" };
+	}
+	return { kind: "pending", landed };
+}
+
+async function postJson(url: string, body: unknown): Promise<unknown> {
+	const response = await fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	try {
+		return await response.json();
+	} catch {
+		return { error: `HTTP ${response.status}` };
+	}
+}
+
+export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
+	input: SendBundleInput,
+): Effect.fn.Return<string[], SendError, SolanaConnection | AppSigner> {
+	const connection = yield* SolanaConnection;
+	const signer = yield* AppSigner;
+	return yield* Effect.tryPromise({
+		try: async () => {
+			const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
+			const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
+			const { legs, tipLamports } = input;
+			if (legs.length === 0 || legs.length > MAX_BUNDLE_TXS) {
+				throw new SendError({
+					message: `[bundle] expected 1..${MAX_BUNDLE_TXS} legs, got ${legs.length}`,
+				});
+			}
+			if (
+				!Number.isInteger(tipLamports) ||
+				tipLamports < JITO_MIN_TIP_LAMPORTS
+			) {
+				throw new SendError({
+					message: `[bundle] invalid tip: ${String(tipLamports)} lamports`,
+				});
+			}
+			const payer = signer.publicKey;
+			const bases = legs.map((leg) => {
+				const base = stripComputeBudgetInstructions(leg.tx.instructions);
+				if (base.length === 0) {
+					throw new SendError({
+						message: `[bundle] ${leg.label} has no instructions`,
+					});
+				}
+				return base;
+			});
+			// Tip rides inside the last leg, never as its own transaction: if
+			// the bundle is unbundled and that leg fails, no tip is paid.
+			bases[bases.length - 1]?.push(
+				SystemProgram.transfer({
+					fromPubkey: payer,
+					toPubkey: pickTipAccount(),
+					lamports: tipLamports,
+				}),
+			);
+			const labels = legs.map((leg) => leg.label);
+			const build = (blockhash: string, limits: readonly number[]) =>
+				bases.map((base, index) => {
+					const tx = new Transaction().add(
+						...buildComputeBudgetInstructions(
+							limits[index] ?? SIMULATION_CU_LIMIT,
+							0,
+						),
+						...base,
+					);
+					tx.feePayer = payer;
+					tx.recentBlockhash = blockhash;
+					tx.sign(signer);
+					return tx;
+				});
+			const signaturesOf = (txs: Transaction[]) =>
+				txs.map((tx, index) => {
+					if (!tx.signature) {
+						throw new SendError({
+							message: `[bundle] ${labels[index]} is unsigned`,
+						});
+					}
+					return bs58.encode(tx.signature);
+				});
+
+			const describeLanding = (
+				landing: BundleLanding,
+				total: number,
+			): SendError | null => {
+				if (landing.kind === "failed") {
+					return new SendError({
+						message: `[bundle] ${labels[landing.index]} failed on-chain: ${landing.err} — check wallet and position manually`,
+					});
+				}
+				if (landing.kind === "pending" && landing.landed > 0) {
+					return new SendError({
+						message: `[bundle] landed partially (${landing.landed}/${total} legs) — check wallet and position manually`,
+					});
+				}
+				return null;
+			};
+
+			let lastSignatures: string[] | undefined;
+			const sendOnce = async (attempt: number): Promise<string[]> => {
+				const { blockhash, lastValidBlockHeight } =
+					await connection.getLatestBlockhash("confirmed");
+				const simTxs = build(
+					blockhash,
+					bases.map(() => SIMULATION_CU_LIMIT),
+				);
+				const simSignatures = signaturesOf(simTxs);
+				let simPayload: unknown;
+				try {
+					simPayload = await postJson(connection.rpcEndpoint, {
+						jsonrpc: "2.0",
+						id: "1",
+						method: "simulateBundle",
+						params: [
+							{
+								encodedTransactions: simTxs.map((tx) =>
+									tx.serialize().toString("base64"),
+								),
+							},
+							{
+								preExecutionAccountsConfigs: simTxs.map(() => null),
+								postExecutionAccountsConfigs: simTxs.map(() => null),
+								skipSigVerify: true,
+								replaceRecentBlockhash: true,
+							},
+						],
+					});
+				} catch (error) {
+					throw new RetryableSendError(
+						`[bundle] simulateBundle request failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				const simulation = parseSimulateBundleResult(simPayload, bases.length);
+				if (!simulation.ok) {
+					if (isRetryableSimulationError(simulation.reason)) {
+						throw new RetryableSendError(`[bundle] ${simulation.reason}`);
+					}
+					const failedIndex = simSignatures.findIndex((sig) =>
+						simulation.reason.includes(sig),
+					);
+					const leg = failedIndex >= 0 ? ` (${labels[failedIndex]})` : "";
+					throw new SendError({
+						message: `[bundle]${leg} ${simulation.reason}`,
+					});
+				}
+				const limits = simulation.unitsConsumed.map((used, index) =>
+					resolveCuLimit(
+						used,
+						legs[index]?.cuBufferMultiplier ?? CU_BUFFER_MULTIPLIER,
+						legs[index]?.cuMinLimit,
+					),
+				);
+				console.log(
+					`[${nowStamp()}] [bundle] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: ${labels
+						.map(
+							(label, index) =>
+								`${label} used=${simulation.unitsConsumed[index]} limit=${limits[index]}`,
+						)
+						.join(", ")} | tip=${tipLamports} lamports`,
+				);
+
+				const finalTxs = build(blockhash, limits);
+				const signatures = signaturesOf(finalTxs);
+				const encoded = finalTxs.map((tx) => tx.serialize().toString("base64"));
+				lastSignatures = signatures;
+				const submit = async (): Promise<string> => {
+					const payload = await postJson(
+						`${input.blockEngineUrl.replace(/\/+$/, "")}/api/v1/bundles`,
+						{
+							jsonrpc: "2.0",
+							id: 1,
+							method: "sendBundle",
+							params: [encoded, { encoding: "base64" }],
+						},
+					);
+					const result =
+						typeof payload === "object" && payload !== null
+							? (payload as { result?: unknown }).result
+							: undefined;
+					if (typeof result !== "string") {
+						throw new Error(`sendBundle rejected: ${JSON.stringify(payload)}`);
+					}
+					return result;
+				};
+				let bundleId: string;
+				try {
+					bundleId = await submit();
+				} catch (error) {
+					throw new RetryableSendError(
+						`[bundle] ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				console.log(
+					`[${nowStamp()}] [bundle] submitted ${labels.join(" -> ")}: https://explorer.jito.wtf/bundle/${bundleId}`,
+				);
+
+				let lastSend = Date.now();
+				for (;;) {
+					let landing: BundleLanding;
+					try {
+						const statuses = await connection.getSignatureStatuses(signatures);
+						landing = classifyBundleLanding(statuses.value);
+					} catch (error) {
+						throw new RetryableSendError(
+							`[bundle] status check failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					if (landing.kind === "landed") {
+						for (const [index, signature] of signatures.entries()) {
+							console.log(
+								`[${nowStamp()}] [${labels[index]}] confirmed: ${formatSig(signature)}`,
+							);
+						}
+						return signatures;
+					}
+					if (landing.kind === "failed") {
+						throw describeLanding(landing, signatures.length);
+					}
+					let currentHeight: number;
+					try {
+						currentHeight = await connection.getBlockHeight();
+					} catch (error) {
+						throw new RetryableSendError(
+							`[bundle] block height check failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					if (currentHeight > lastValidBlockHeight) {
+						const partial = describeLanding(landing, signatures.length);
+						if (partial) {
+							throw partial;
+						}
+						throw new RetryableSendError("[bundle] blockhash expired");
+					}
+					if (Date.now() - lastSend >= resendMs) {
+						try {
+							await submit();
+						} catch {
+							// Rebroadcast is best-effort; keep polling until expiry.
+						}
+						lastSend = Date.now();
+					}
+					await sleep(pollMs);
+				}
+			};
+
+			for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+				try {
+					if (lastSignatures !== undefined) {
+						// Previous attempt errored mid-flight; the bundle may still
+						// have landed, so check before rebuilding with a new blockhash.
+						let landing: BundleLanding | undefined;
+						try {
+							const prior =
+								await connection.getSignatureStatuses(lastSignatures);
+							landing = classifyBundleLanding(prior.value);
+						} catch {
+							// Status check itself failed; rebuild below.
+						}
+						if (landing?.kind === "landed") {
+							return lastSignatures;
+						}
+						const partial =
+							landing && describeLanding(landing, lastSignatures.length);
+						if (partial) {
+							throw partial;
+						}
+					}
+					return await sendOnce(attempt);
+				} catch (error) {
+					if (
+						!(error instanceof RetryableSendError) ||
+						attempt >= MAX_SEND_ATTEMPTS
+					) {
+						throw error;
+					}
+					console.warn(
+						`[${nowStamp()}] [bundle] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error.message}`,
+					);
+					await sleep(SIM_RETRY_DELAY_MS);
+				}
+			}
+			throw new SendError({
+				message: `[bundle] failed after ${MAX_SEND_ATTEMPTS} attempts`,
+			});
+		},
+		catch: toSendError,
+	});
+});

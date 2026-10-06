@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
 	buildComputeBudgetInstructions,
 	COMPUTE_BUDGET_PROGRAM_ID,
+	classifyBundleLanding,
 	computeUnitLimitWithBuffer,
 	isRetryableSimulationError,
+	JITO_TIP_ACCOUNTS,
 	parsePriorityFeeEstimate,
+	parseSimulateBundleResult,
+	pickTipAccount,
 	resolveCuLimit,
 	SendError,
 	SIM_BLOCKHASH_COMMITMENT,
@@ -122,5 +126,105 @@ describe("parsePriorityFeeEstimate", () => {
 		expect(
 			parsePriorityFeeEstimate({ result: { priorityFeeEstimate: -10 } }),
 		).toBe(0);
+	});
+});
+
+describe("pickTipAccount", () => {
+	test("maps the random range onto the 8 Jito tip accounts", () => {
+		expect(pickTipAccount(() => 0).toBase58()).toBe(JITO_TIP_ACCOUNTS[0]);
+		expect(pickTipAccount(() => 0.999999).toBase58()).toBe(
+			JITO_TIP_ACCOUNTS[7],
+		);
+		expect(pickTipAccount(() => 1).toBase58()).toBe(JITO_TIP_ACCOUNTS[7]);
+	});
+});
+
+describe("parseSimulateBundleResult", () => {
+	const succeeded = (units: unknown[]) => ({
+		result: {
+			value: {
+				summary: "succeeded",
+				transactionResults: units.map((unitsConsumed) => ({
+					err: null,
+					unitsConsumed,
+				})),
+			},
+		},
+	});
+
+	test("returns per-leg unitsConsumed on success", () => {
+		expect(parseSimulateBundleResult(succeeded([450, 120_000]), 2)).toEqual({
+			ok: true,
+			unitsConsumed: [450, 120_000],
+		});
+	});
+
+	test("fails on a failed summary", () => {
+		const result = parseSimulateBundleResult(
+			{
+				result: {
+					value: {
+						summary: {
+							failed: { error: "InstructionError", tx_signature: "abc" },
+						},
+						transactionResults: [],
+					},
+				},
+			},
+			2,
+		);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.reason).toContain("abc");
+		}
+	});
+
+	test("fails when the RPC does not support simulateBundle", () => {
+		const result = parseSimulateBundleResult(
+			{ error: { code: -32601, message: "Method not found" } },
+			1,
+		);
+		expect(result.ok).toBe(false);
+	});
+
+	test("fails on missing units or a leg-count mismatch", () => {
+		expect(parseSimulateBundleResult(succeeded([450]), 2).ok).toBe(false);
+		expect(parseSimulateBundleResult(succeeded([null]), 1).ok).toBe(false);
+		expect(parseSimulateBundleResult(null, 1).ok).toBe(false);
+	});
+});
+
+describe("classifyBundleLanding", () => {
+	const confirmed = {
+		slot: 1,
+		confirmations: null,
+		err: null,
+		confirmationStatus: "confirmed" as const,
+	};
+
+	test("landed only when every leg is confirmed", () => {
+		expect(classifyBundleLanding([confirmed, confirmed])).toEqual({
+			kind: "landed",
+		});
+	});
+
+	test("pending counts legs that landed outside the bundle", () => {
+		expect(classifyBundleLanding([null, null])).toEqual({
+			kind: "pending",
+			landed: 0,
+		});
+		expect(classifyBundleLanding([confirmed, null])).toEqual({
+			kind: "pending",
+			landed: 1,
+		});
+		expect(classifyBundleLanding([])).toEqual({ kind: "pending", landed: 0 });
+	});
+
+	test("any on-chain error fails with the leg index", () => {
+		const failed = { ...confirmed, err: { InstructionError: [0, "Custom"] } };
+		expect(classifyBundleLanding([confirmed, failed])).toMatchObject({
+			kind: "failed",
+			index: 1,
+		});
 	});
 });

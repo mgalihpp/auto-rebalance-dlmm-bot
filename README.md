@@ -75,6 +75,9 @@ The bot starts in `DRY_RUN=true` by default, so it only prints what it *would* d
 | `COMPOUND_FEES` | No | `false` | If `true`, redeposit claimed fees back into the position after a rebalance; if `false`, claimed fees stay in the wallet |
 | `SLIPPAGE_BPS` | No | `50` | Slippage tolerance in basis points (0–10000) |
 | `STRATEGY` | No | `Curve` | Liquidity shape: `Spot`, `Curve`, or `BidAsk` |
+| `JITO_BUNDLE` | No | `false` | If `true`, send remove → swap → zap-in → clean-up as one atomic Jito bundle, so a rebalance never stops half-way. Needs an `RPC_URL` that supports `simulateBundle` (Helius). |
+| `JITO_TIP_LAMPORTS` | No | `100000` | Jito tip per bundle in lamports (1000–10000000), paid only when the bundle lands |
+| `JITO_BLOCK_ENGINE_URL` | No | `https://mainnet.block-engine.jito.wtf` | Jito Block Engine that receives the bundle |
 | `JUPITER_API_KEY` | No | none | Optional Jupiter API key for zap routing |
 | `POLL_INTERVAL_MS` | No | `60000` | Recheck interval in ms (5000–3600000) |
 | `TELEGRAM_BOT_TOKEN` | No | none | Bot token for Telegram alerts and commands. Set both Telegram vars to enable, leave both empty to disable. |

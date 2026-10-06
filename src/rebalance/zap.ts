@@ -21,15 +21,17 @@ import {
 import BN from "bn.js";
 import { Data, Effect, Ref } from "effect";
 import {
-	type AppConfig,
+	AppConfig,
 	AppSigner,
 	RuntimeTunables,
 	SolanaConnection,
 } from "../services.ts";
 import { formatSig, nowStamp } from "../utils.ts";
 import {
+	type BundleLeg,
 	SWAP_CU_BUFFER_MULTIPLIER,
 	SWAP_CU_MIN_LIMIT,
+	sendJitoBundle,
 	sendManualTransaction,
 } from "./send.ts";
 import { type StrategyKind, toStrategyType } from "./types.ts";
@@ -336,6 +338,8 @@ function executeCompoundTopUp(
 	});
 }
 
+const PREP_LABELS: ReadonlySet<string> = new Set(["setup", "init-bin-array"]);
+
 export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	input: ZapExecuteInput,
 ): Effect.fn.Return<
@@ -373,17 +377,47 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		["zap-in", response.zapInTransaction],
 		["clean-up", response.cleanUpTransaction],
 	];
-	let last = "";
+	const legs: BundleLeg[] = [];
 	for (const [label, tx] of txs) {
-		if (!tx) {
-			continue;
+		if (tx) {
+			legs.push({
+				tx,
+				label,
+				cuBufferMultiplier:
+					label === "swap" ? SWAP_CU_BUFFER_MULTIPLIER : undefined,
+				cuMinLimit: label === "swap" ? SWAP_CU_MIN_LIMIT : undefined,
+			});
 		}
-		last = yield* sendZapTx(
-			tx,
-			label,
-			label === "swap" ? SWAP_CU_BUFFER_MULTIPLIER : undefined,
-			label === "swap" ? SWAP_CU_MIN_LIMIT : undefined,
+	}
+	const config = yield* AppConfig;
+	let last = "";
+	if (config.jitoBundle) {
+		// setup (idempotent ATAs) and init-bin-array are harmless alone and
+		// push the zap past the 5-tx bundle cap, so they go first on their own.
+		// Everything from remove to clean-up lands atomically as one bundle.
+		const prep = legs.filter((leg) => PREP_LABELS.has(leg.label));
+		const core = legs.filter((leg) => !PREP_LABELS.has(leg.label));
+		for (const leg of prep) {
+			yield* sendZapTx(leg.tx, leg.label);
+		}
+		const signatures = yield* Effect.mapError(
+			sendJitoBundle({
+				legs: core,
+				tipLamports: config.jitoTipLamports,
+				blockEngineUrl: config.jitoBlockEngineUrl,
+			}),
+			(error) => toZapError(error),
 		);
+		last = signatures.at(-1) ?? "";
+	} else {
+		for (const leg of legs) {
+			last = yield* sendZapTx(
+				leg.tx,
+				leg.label,
+				leg.cuBufferMultiplier,
+				leg.cuMinLimit,
+			);
+		}
 	}
 	const topUp = yield* executeCompoundTopUp(input.compound);
 	return { signature: topUp ?? last };

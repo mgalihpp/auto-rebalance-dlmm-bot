@@ -115,6 +115,44 @@ describe("loadConfig compound fees", () => {
 	});
 });
 
+describe("loadConfig jito bundle", () => {
+	test("is off by default with the mainnet block engine and 100k tip", async () => {
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(config.jitoBundle).toBe(false);
+		expect(config.jitoTipLamports).toBe(100_000);
+		expect(config.jitoBlockEngineUrl).toBe(
+			"https://mainnet.block-engine.jito.wtf",
+		);
+	});
+
+	test("accepts custom values", async () => {
+		const config = await Effect.runPromise(
+			loadConfig(
+				makeEnv({
+					JITO_BUNDLE: "true",
+					JITO_TIP_LAMPORTS: "1000",
+					JITO_BLOCK_ENGINE_URL: "https://ny.mainnet.block-engine.jito.wtf",
+				}),
+			),
+		);
+		expect(config.jitoBundle).toBe(true);
+		expect(config.jitoTipLamports).toBe(1000);
+		expect(config.jitoBlockEngineUrl).toBe(
+			"https://ny.mainnet.block-engine.jito.wtf",
+		);
+	});
+
+	test.each([
+		{ JITO_TIP_LAMPORTS: "999" },
+		{ JITO_TIP_LAMPORTS: "10000001" },
+		{ JITO_BLOCK_ENGINE_URL: "ws://block-engine" },
+		{ JITO_BUNDLE: "maybe" },
+	])("rejects %p with ConfigError", async (overrides) => {
+		const error = await loadFailure(makeEnv(overrides));
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});
+
 describe("strict single-value parsers (Telegram registry reuse)", () => {
 	test("slippage accepts bounds, rejects empty and out-of-range", async () => {
 		expect(await Effect.runPromise(parseSlippageBpsValue("0"))).toBe(0);

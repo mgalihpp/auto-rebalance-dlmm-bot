@@ -13,7 +13,11 @@ import BN from "bn.js";
 import { Effect, Ref } from "effect";
 import { AppSigner, RuntimeTunables, SolanaConnection } from "../services.ts";
 import { formatSig, nowStamp, shortAddr } from "../utils.ts";
-import { SWAP_CU_BUFFER_MULTIPLIER, sendManualTransaction } from "./send.ts";
+import {
+	SWAP_CU_BUFFER_MULTIPLIER,
+	SWAP_CU_MIN_LIMIT,
+	sendManualTransaction,
+} from "./send.ts";
 import { ZapError } from "./zap.ts";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
@@ -124,9 +128,11 @@ function readWalletBalance(
 	});
 }
 
+// Swap legs get the same CU floor as the zap swap leg; unwraps do not need it.
 function sendSweepTx(
 	tx: Transaction,
 	label: string,
+	cuMinLimit?: number,
 ): Effect.Effect<
 	string,
 	ZapError,
@@ -141,6 +147,7 @@ function sendSweepTx(
 				label,
 				priorityLevel: tunables.priorityLevel,
 				cuBufferMultiplier: SWAP_CU_BUFFER_MULTIPLIER,
+				cuMinLimit,
 			}),
 			(error) => toZapError(error),
 		);
@@ -233,7 +240,7 @@ function executeSweepLeg(
 		if (unwrapIx) {
 			tx.add(unwrapIx);
 		}
-		const signature = yield* sendSweepTx(tx, `sweep-${tag}`);
+		const signature = yield* sendSweepTx(tx, `sweep-${tag}`, SWAP_CU_MIN_LIMIT);
 		console.log(
 			`[${nowStamp()}] Swept ${leg.amount.toString()} ${shortAddr(leg.mint)} to SOL (swap): ${formatSig(signature)}`,
 		);

@@ -4,8 +4,10 @@ import {
 	COMPUTE_BUDGET_PROGRAM_ID,
 	classifyBundleLanding,
 	computeUnitLimitWithBuffer,
+	INFLIGHT_BUNDLE_STATUSES,
 	isRetryableSimulationError,
 	JITO_TIP_ACCOUNTS,
+	parseInflightBundleStatus,
 	parsePriorityFeeEstimate,
 	parseSimulateBundleResult,
 	pickTipAccount,
@@ -126,6 +128,27 @@ describe("parsePriorityFeeEstimate", () => {
 		expect(
 			parsePriorityFeeEstimate({ result: { priorityFeeEstimate: -10 } }),
 		).toBe(0);
+	});
+});
+
+describe("parseInflightBundleStatus", () => {
+	const payload = (status: unknown) => ({
+		result: { value: [{ bundle_id: "abc", status, landed_slot: null }] },
+	});
+
+	test("reads the status of the matching bundle", () => {
+		for (const status of INFLIGHT_BUNDLE_STATUSES) {
+			expect(parseInflightBundleStatus(payload(status), "abc")).toBe(status);
+		}
+	});
+
+	test("returns null for other bundles, unknown statuses and errors", () => {
+		expect(parseInflightBundleStatus(payload("Failed"), "other")).toBeNull();
+		expect(parseInflightBundleStatus(payload("Weird"), "abc")).toBeNull();
+		expect(
+			parseInflightBundleStatus({ error: { code: -32601 } }, "abc"),
+		).toBeNull();
+		expect(parseInflightBundleStatus(null, "abc")).toBeNull();
 	});
 });
 

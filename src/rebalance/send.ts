@@ -591,6 +591,38 @@ export function classifyBundleLanding(
 	return { kind: "pending", landed };
 }
 
+// Jito's own view of a submitted bundle (getInflightBundleStatuses, 5-minute
+// look back). "Invalid" also covers "not reached the block engine yet", so
+// the poll loop only trusts it after JITO_INVALID_GRACE_MS.
+export const INFLIGHT_BUNDLE_STATUSES = [
+	"Pending",
+	"Landed",
+	"Failed",
+	"Invalid",
+] as const;
+export type InflightBundleStatus = (typeof INFLIGHT_BUNDLE_STATUSES)[number];
+export const JITO_INVALID_GRACE_MS = 10_000;
+
+export function parseInflightBundleStatus(
+	payload: unknown,
+	bundleId: string,
+): InflightBundleStatus | null {
+	const value = (payload as { result?: { value?: unknown } } | null)?.result
+		?.value;
+	if (!Array.isArray(value)) {
+		return null;
+	}
+	const entry = value.find(
+		(item) =>
+			typeof item === "object" &&
+			item !== null &&
+			(item as { bundle_id?: unknown }).bundle_id === bundleId,
+	) as { status?: unknown } | undefined;
+	return (
+		INFLIGHT_BUNDLE_STATUSES.find((status) => status === entry?.status) ?? null
+	);
+}
+
 async function postJson(url: string, body: unknown): Promise<unknown> {
 	const response = await fetch(url, {
 		method: "POST",
@@ -766,16 +798,14 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 				const encoded = finalTxs.map((tx) => tx.serialize().toString("base64"));
 				lastSignatures = signatures;
 				lastBundleId = undefined;
+				const blockEngine = input.blockEngineUrl.replace(/\/+$/, "");
 				const submit = async (): Promise<string> => {
-					const payload = await postJson(
-						`${input.blockEngineUrl.replace(/\/+$/, "")}/api/v1/bundles`,
-						{
-							jsonrpc: "2.0",
-							id: 1,
-							method: "sendBundle",
-							params: [encoded, { encoding: "base64" }],
-						},
-					);
+					const payload = await postJson(`${blockEngine}/api/v1/bundles`, {
+						jsonrpc: "2.0",
+						id: 1,
+						method: "sendBundle",
+						params: [encoded, { encoding: "base64" }],
+					});
 					const result =
 						typeof payload === "object" && payload !== null
 							? (payload as { result?: unknown }).result
@@ -798,7 +828,9 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 					`[${nowStamp()}] [bundle] submitted ${labels.join(" -> ")}: ${jitoBundleUrl(bundleId)}`,
 				);
 
-				let lastSend = Date.now();
+				const submittedAt = Date.now();
+				let lastSend = submittedAt;
+				let lastInflight: InflightBundleStatus | null = null;
 				for (;;) {
 					let landing: BundleLanding;
 					try {
@@ -836,10 +868,46 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 						throw new RetryableSendError("[bundle] blockhash expired");
 					}
 					if (Date.now() - lastSend >= resendMs) {
+						let inflight: InflightBundleStatus | null = null;
 						try {
-							await submit();
+							inflight = parseInflightBundleStatus(
+								await postJson(
+									`${blockEngine}/api/v1/getInflightBundleStatuses`,
+									{
+										jsonrpc: "2.0",
+										id: 1,
+										method: "getInflightBundleStatuses",
+										params: [[bundleId]],
+									},
+								),
+								bundleId,
+							);
 						} catch {
-							// Rebroadcast is best-effort; keep polling until expiry.
+							// Status is diagnostic only; keep polling signatures.
+						}
+						if (inflight !== null && inflight !== lastInflight) {
+							console.log(`[${nowStamp()}] [bundle] Jito status: ${inflight}`);
+							lastInflight = inflight;
+						}
+						const dropped =
+							inflight === "Failed" ||
+							(inflight === "Invalid" &&
+								Date.now() - submittedAt >= JITO_INVALID_GRACE_MS);
+						if (dropped) {
+							const partial = describeLanding(landing, signatures.length);
+							if (partial) {
+								throw partial;
+							}
+							throw new RetryableSendError(
+								`[bundle] Jito dropped the bundle (${inflight}) — usually outbid in the tip auction`,
+							);
+						}
+						if (inflight !== "Landed") {
+							try {
+								await submit();
+							} catch {
+								// Rebroadcast is best-effort; keep polling until expiry.
+							}
 						}
 						lastSend = Date.now();
 					}

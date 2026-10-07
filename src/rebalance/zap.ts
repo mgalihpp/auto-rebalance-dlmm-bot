@@ -427,7 +427,12 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		// push the zap past the 5-tx bundle cap, so they go first on their own.
 		// Everything from remove to clean-up lands atomically as one bundle.
 		const prep = legs.filter((leg) => PREP_LABELS.has(leg.label));
-		const core = legs.filter((leg) => !PREP_LABELS.has(leg.label));
+		// No swap CU floor here: a short limit only drops the whole bundle, and
+		// Jito ranks bundles by tip per requested CU, so the 400k floor would
+		// cut the bid to a fraction.
+		const core = legs
+			.filter((leg) => !PREP_LABELS.has(leg.label))
+			.map((leg) => ({ ...leg, cuMinLimit: undefined }));
 		for (const leg of prep) {
 			yield* sendZapTx(leg.tx, leg.label);
 		}

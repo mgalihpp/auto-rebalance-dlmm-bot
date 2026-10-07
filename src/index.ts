@@ -44,22 +44,24 @@ import {
 	configMenuKeyboard,
 	configValueKeyboard,
 	confirmInlineKeyboard,
-	escapeHtml,
-	formatCommandError,
 	formatConfigBadValue,
 	formatConfigPick,
 	formatConfigPreview,
 	formatConfigShow,
 	formatConfigUnknownKey,
 	formatConfigUpdated,
+	formatHelpReply,
 	formatInRangeReply,
 	formatPausedReply,
 	formatPausedSkip,
 	formatPreviewReply,
+	formatQueuedReply,
 	formatResumedReply,
 	formatStatusReply,
+	formatUnknownCommandReply,
 	notifyTelegramEvent,
 	notifyTelegramText,
+	pairOf,
 	setTelegramMenuCommands,
 	type TelegramEvent,
 } from "./telegram/notify.ts";
@@ -296,7 +298,7 @@ function runIteration() {
 				console.log(`[${nowStamp()}] Dry run — no fee claim sent.`);
 				return;
 			}
-			const claimed = yield* executeInRangeFeeClaim({
+			const claim = executeInRangeFeeClaim({
 				dlmm: state.dlmm,
 				position: state.position,
 				action,
@@ -318,12 +320,25 @@ function runIteration() {
 					jupiterApiKey: config.jupiterApiKey,
 				},
 			});
+			// Caught here, not in the main loop, so the alert names the fee claim.
+			const claimed = yield* Effect.catch(claim, (error) =>
+				Effect.gen(function* () {
+					console.error(`[${nowStamp()}] Fee claim failed:`, error);
+					yield* notify({
+						kind: "failed",
+						stage: "fee claim",
+						message: error.message,
+					});
+					return null;
+				}),
+			);
 			if (claimed !== null) {
 				yield* notify({
 					kind: "feesClaimed",
 					action: claimed.action,
 					pool: snapshot.pool,
 					position: snapshot.position,
+					pair: pairOf(snapshot),
 					valueDisplay,
 					signature: claimed.signature,
 				});
@@ -378,6 +393,7 @@ function runIteration() {
 			kind: "rebalanceNeeded",
 			pool: snapshot.pool,
 			position: snapshot.position,
+			pair: pairOf(snapshot),
 			activeBinId: snapshot.activeBinId,
 			lowerBinId: snapshot.lowerBinId,
 			upperBinId: snapshot.upperBinId,
@@ -411,6 +427,7 @@ function runIteration() {
 			kind: "rebalanced",
 			pool: snapshot.pool,
 			position: snapshot.position,
+			pair: pairOf(snapshot),
 			signature: done.signature,
 		});
 	});
@@ -433,12 +450,12 @@ function handleBotCommand(command: BotCommand) {
 				);
 			}
 			if (command.kind === "help") {
-				yield* replyText(TELEGRAM_HELP_TEXT);
+				yield* replyText(formatHelpReply(TELEGRAM_HELP_TEXT));
 				return;
 			}
 			if (command.kind === "unknown") {
 				yield* replyText(
-					`<b>Unknown command</b>\n<code>${escapeHtml(command.text)}</code>\n\n${TELEGRAM_HELP_TEXT}`,
+					formatUnknownCommandReply(command.text, TELEGRAM_HELP_TEXT),
 				);
 				return;
 			}
@@ -568,9 +585,7 @@ function handleBotCommand(command: BotCommand) {
 				shouldDeferLiveConfirm(command, config.dryRun)
 			) {
 				queuePendingLiveConfirm(command);
-				yield* replyText(
-					`<b>Rebalance queued</b>\nLive execution will run in the main loop within one poll interval.`,
-				);
+				yield* replyText(formatQueuedReply());
 				return;
 			}
 			const tunables = yield* getTunables();
@@ -579,11 +594,11 @@ function handleBotCommand(command: BotCommand) {
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
-				const base = formatStatusReply(snapshot);
 				yield* replyText(
-					isBotPaused()
-						? `${base}\n\n⏸ <b>Paused.</b> Send <code>/resume</code> to continue.`
-						: base,
+					formatStatusReply(snapshot, {
+						dryRun: config.dryRun,
+						paused: isBotPaused(),
+					}),
 				);
 				return;
 			}
@@ -610,10 +625,11 @@ function handleBotCommand(command: BotCommand) {
 					halfWidth,
 					jupiterApiKey: config.jupiterApiKey,
 				});
-				const preview = formatPreviewReply({
-					header: "🔍 <b>Rebalance preview</b>",
+				const previewInput = {
+					preview: true,
 					pool: snapshot.pool,
 					position: snapshot.position,
+					pair: pairOf(snapshot),
 					activeBinId: snapshot.activeBinId,
 					lowerBinId: snapshot.lowerBinId,
 					upperBinId: snapshot.upperBinId,
@@ -632,16 +648,24 @@ function handleBotCommand(command: BotCommand) {
 					slippageBps: plan.slippageBps,
 					dryRun: config.dryRun,
 					swapsDisplay: describeZapSwap(plan.estimate),
-				});
+				};
 				if (!command.confirmed) {
 					yield* replyText(
-						`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
+						formatPreviewReply({
+							...previewInput,
+							note: config.dryRun
+								? "No transactions sent. Live execution via chat stays off while DRY_RUN=true."
+								: "Tap ✅ Confirm live or send <code>/rebalance confirm</code> to execute.",
+						}),
 						confirmInlineKeyboard(config.dryRun),
 					);
 					return;
 				}
 				yield* replyText(
-					`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).`,
+					formatPreviewReply({
+						...previewInput,
+						note: "No transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).",
+					}),
 				);
 				// Live confirms defer earlier via shouldDeferLiveConfirm, so reaching
 				// here means preview-only. Never execute live in the fast loop.
@@ -659,13 +683,7 @@ function handleBotCommand(command: BotCommand) {
 				// Console-only failures are invisible in chat. Reply so /status
 				// and /rebalance errors (e.g. no funded position in this pool)
 				// surface in Telegram. Never fails the caller.
-				const exit = yield* Effect.exit(AppConfig);
-				if (exit._tag === "Success") {
-					yield* notifyTelegramText(
-						formatCommandError(message),
-						exit.value.telegram,
-					);
-				}
+				yield* notify({ kind: "failed", stage: "command", message });
 			}),
 	);
 }
@@ -786,6 +804,7 @@ function drainPendingConfirm() {
 				kind: "rebalanced",
 				pool: snapshot.pool,
 				position: snapshot.position,
+				pair: pairOf(snapshot),
 				signature: done.signature,
 			});
 		}),
@@ -795,13 +814,7 @@ function drainPendingConfirm() {
 				yield* Effect.sync(() =>
 					console.warn(`[${nowStamp()}] Telegram command failed: ${message}`),
 				);
-				const exit = yield* Effect.exit(AppConfig);
-				if (exit._tag === "Success") {
-					yield* notifyTelegramText(
-						formatCommandError(message),
-						exit.value.telegram,
-					);
-				}
+				yield* notify({ kind: "failed", stage: "rebalance", message });
 			}),
 	);
 }
@@ -844,7 +857,10 @@ while (!stopped) {
 		console.error(`[${nowStamp()}] Rebalance failed:`, error);
 		const message = error instanceof Error ? error.message : String(error);
 		await Effect.runPromise(
-			Effect.provide(notify({ kind: "failed", message }), appLive),
+			Effect.provide(
+				notify({ kind: "failed", stage: "rebalance", message }),
+				appLive,
+			),
 		);
 	}
 	if (stopped) {

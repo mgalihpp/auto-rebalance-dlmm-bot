@@ -32,9 +32,9 @@ import {
 	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
 import {
+	activeSummary,
 	configMenuKeyboard,
 	configValueKeyboard,
-	directionLine,
 	escapeHtml,
 	formatConfigBadValue,
 	formatConfigPick,
@@ -44,7 +44,9 @@ import {
 	formatConfigUpdated,
 	formatPausedReply,
 	formatPausedSkip,
+	formatPreviewReply,
 	formatResumedReply,
+	formatStatusReply,
 	formatTelegramMessage,
 	notifyTelegramEvent,
 	notifyTelegramText,
@@ -125,94 +127,219 @@ describe("telegram config pairing", () => {
 	});
 });
 
+const POOL = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6Z";
+const POSITION = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const SIG =
+	"8uirQ6d2vyYH2JXqpMvB4Lm4hS5c9bNw3e7kTq1zR8fG2pXyW5nV6tA3sD9jK4mL7oP1qR2sT3uV4wX5yZ6aS7Ba";
+
+const visibleText = (html: string) => html.replace(/<[^>]+>/g, "");
+const hrefsOf = (html: string) =>
+	[...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
+
+// Shared phone-layout contract: emoji + bold title, blank line, every link
+// once and only on the final line, and no full address in visible text.
+function expectPhoneLayout(text: string) {
+	const lines = text.split("\n");
+	expect(lines[0]).toMatch(/^\S+ <b>[^<]+<\/b>/);
+	if (lines.length > 1) {
+		expect(lines[1]).toBe("");
+	}
+	const hrefs = hrefsOf(text);
+	expect(new Set(hrefs).size).toBe(hrefs.length);
+	if (hrefs.length > 0) {
+		const last = lines.at(-1) ?? "";
+		expect(last.startsWith("🔗 ")).toBe(true);
+		expect(hrefsOf(last).length).toBe(hrefs.length);
+	}
+	const visible = visibleText(text);
+	for (const full of [POOL, POSITION, SIG]) {
+		expect(visible).not.toContain(full);
+	}
+}
+
+const neededEvent = {
+	kind: "rebalanceNeeded",
+	pool: POOL,
+	position: POSITION,
+	pair: "PEPE/SOL",
+	activeBinId: 1100,
+	lowerBinId: 966,
+	upperBinId: 1034,
+	newLowerBinId: 1066,
+	newUpperBinId: 1134,
+	amountXDisplay: "0.90269 X",
+	amountYDisplay: "0.756 Y",
+	slippageBps: 50,
+	dryRun: true,
+} as const;
+
 describe("formatTelegramMessage", () => {
-	test("startup includes pool and dry-run mode", () => {
+	test("startup shows mode and a short pool with one Pool link", () => {
 		const text = formatTelegramMessage({
 			kind: "startup",
-			pool: "Pool111",
+			pool: POOL,
 			dryRun: true,
 		});
-		expect(text).toContain("Po");
-		expect(text).toContain("dry run");
+		expectPhoneLayout(text);
+		expect(text).toContain("<b>Bot started</b>");
+		expect(text).toContain("Mode: dry run");
+		expect(text).toContain(`<code>${shortAddr(POOL)}</code>`);
+		expect(hrefsOf(text)).toEqual([`https://app.meteora.ag/dlmm/${POOL}`]);
 	});
 
-	test("shutdown is a short notice", () => {
-		expect(formatTelegramMessage({ kind: "shutdown" })).toContain("stopped");
+	test("shutdown is a title-only notice", () => {
+		const text = formatTelegramMessage({ kind: "shutdown" });
+		expectPhoneLayout(text);
+		expect(text).toBe("🛑 <b>Bot stopped</b>");
 	});
 
-	test("rebalanceNeeded includes preview ranges", () => {
-		const text = formatTelegramMessage({
-			kind: "rebalanceNeeded",
-			pool: "Pool111",
-			position: "Pos222",
-			activeBinId: 1100,
-			lowerBinId: 966,
-			upperBinId: 1034,
-			newLowerBinId: 1066,
-			newUpperBinId: 1134,
-			amountXDisplay: "0.90269 X",
-			amountYDisplay: "0.756 Y",
-			slippageBps: 50,
-			dryRun: true,
-		});
-		expect(text).toContain("ABOVE");
-		expect(text).toContain("966 to 1034");
-		expect(text).toContain("1066 to 1134");
-		expect(text).toContain("0.90269 X");
-		expect(text).toContain("0.756 Y");
+	test("rebalanceNeeded keeps the range bar and uses the shared labels", () => {
+		const text = formatTelegramMessage(neededEvent);
+		expectPhoneLayout(text);
+		expect(text.split("\n")[0]).toBe(
+			"⚠️ <b>Rebalance needed</b> <code>PEPE/SOL</code>",
+		);
+		expect(text).toContain("Active: 1100 · 66 bins ABOVE range");
+		expect(text).toContain(
+			"Range: <code>966 to 1034</code> → <code>1066 to 1134</code>",
+		);
 		expect(text).toContain("<pre>");
-		expect(text).toContain("^");
-		expect(text).toContain("Dry run");
+		expect(text).toContain("<i>= old range · + new range · ^ active</i>");
+		expect(text).toContain(
+			"Balances: <code>0.90269 X</code> · <code>0.756 Y</code>",
+		);
+		expect(text).toContain("Slippage: 50 bps");
+		expect(text).toContain("Mode: dry run");
+		expect(text).toContain("No transactions sent.");
+		expect(hrefsOf(text)).toEqual([
+			`https://app.meteora.ag/dlmm/${POOL}`,
+			`https://solscan.io/account/${POSITION}`,
+		]);
 	});
 
-	test("rebalanced includes short signature link", () => {
+	test("rebalanceNeeded live says it is executing", () => {
+		const text = formatTelegramMessage({ ...neededEvent, dryRun: false });
+		expectPhoneLayout(text);
+		expect(text).toContain("Mode: <b>LIVE</b>");
+		expect(text).toContain("Executing now.");
+	});
+
+	test("rebalanced links tx, pool and position once each", () => {
 		const text = formatTelegramMessage({
 			kind: "rebalanced",
-			pool: "Pool111",
-			position: "Pos222",
-			signature: "Sig333",
+			pool: POOL,
+			position: POSITION,
+			pair: "PEPE/SOL",
+			signature: SIG,
 		});
-		expect(text).toContain("Sig333");
-		expect(text).toContain("https://solscan.io/tx/Sig333");
-		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
+		expectPhoneLayout(text);
+		expect(text).toContain("<b>Rebalanced</b> <code>PEPE/SOL</code>");
+		expect(text).toContain(`Tx: <code>${shortAddr(SIG)}</code>`);
+		expect(hrefsOf(text)).toEqual([
+			`https://solscan.io/tx/${SIG}`,
+			`https://app.meteora.ag/dlmm/${POOL}`,
+			`https://solscan.io/account/${POSITION}`,
+		]);
 	});
 
-	test("feesClaimed sweep shows value and signature link", () => {
-		const text = formatTelegramMessage({
+	test("feesClaimed names the action and shows the value", () => {
+		const base = {
 			kind: "feesClaimed",
-			action: "sweep",
-			pool: "Pool111",
-			position: "Pos222",
+			pool: POOL,
+			position: POSITION,
+			pair: "PEPE/SOL",
 			valueDisplay: "0.012 SOL",
-			signature: "Sig333",
-		});
-		expect(text).toContain("Fees swept to SOL");
-		expect(text).not.toContain("Fees compounded");
-		expect(text).toContain("0.012 SOL");
-		expect(text).toContain("https://solscan.io/tx/Sig333");
-		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
+			signature: SIG,
+		} as const;
+		const sweep = formatTelegramMessage({ ...base, action: "sweep" });
+		expectPhoneLayout(sweep);
+		expect(sweep).toContain("<b>Fees swept to SOL</b>");
+		expect(sweep).not.toContain("Fees compounded");
+		expect(sweep).toContain("Value: ~0.012 SOL");
+		expect(hrefsOf(sweep).length).toBe(3);
+		const compound = formatTelegramMessage({ ...base, action: "compound" });
+		expectPhoneLayout(compound);
+		expect(compound).toContain("<b>Fees compounded</b>");
+		expect(compound).not.toContain("Fees swept to SOL");
 	});
 
-	test("feesClaimed compound names the compound action", () => {
-		const text = formatTelegramMessage({
-			kind: "feesClaimed",
-			action: "compound",
-			pool: "Pool111",
-			position: "Pos222",
-			valueDisplay: "0.02 SOL",
-			signature: "Sig444",
-		});
-		expect(text).toContain("Fees compounded");
-		expect(text).not.toContain("Fees swept to SOL");
-		expect(text).toContain("https://solscan.io/tx/Sig444");
+	test("failed names the stage that failed", () => {
+		const titles = {
+			rebalance: "Rebalance failed",
+			"fee claim": "Fee claim failed",
+			command: "Command failed",
+		} as const;
+		for (const [stage, title] of Object.entries(titles)) {
+			const text = formatTelegramMessage({
+				kind: "failed",
+				stage: stage as keyof typeof titles,
+				message: "boom",
+			});
+			expectPhoneLayout(text);
+			expect(text).toBe(`❌ <b>${title}</b>\n\nError: <code>boom</code>`);
+		}
 	});
 
-	test("failed includes the error message", () => {
+	test("failed adds a hint when no position is funded", () => {
 		const text = formatTelegramMessage({
 			kind: "failed",
-			message: "boom",
+			stage: "command",
+			message: "no DLMM position found for owner",
 		});
-		expect(text).toContain("boom");
+		expect(text).toContain("POOL_ADDRESS");
+	});
+});
+
+describe("status and preview replies", () => {
+	const snapshot = {
+		pool: POOL,
+		position: POSITION,
+		owner: POSITION,
+		activeBinId: 1000,
+		activeBinPrice: "1",
+		lowerBinId: 966,
+		upperBinId: 1034,
+		amountX: new BN("1500000000"),
+		amountY: new BN("756000000"),
+		feeX: new BN(0),
+		feeY: new BN(0),
+		claimedFeeX: new BN(0),
+		claimedFeeY: new BN(0),
+		tokenXMint: POOL,
+		tokenYMint: POSITION,
+		tokenXDecimals: 9,
+		tokenYDecimals: 6,
+		tokenXSymbol: "PEPE",
+		tokenYSymbol: "SOL",
+	};
+
+	test("status keeps the range bar and shows mode and pause state", () => {
+		const text = formatStatusReply(snapshot, { dryRun: true, paused: true });
+		expectPhoneLayout(text);
+		expect(text.split("\n")[0]).toBe(
+			"📊 <b>Position</b> <code>PEPE/SOL</code>",
+		);
+		expect(text).toContain("Active: 1000 · inside range");
+		expect(text).toContain("<pre>");
+		expect(text).toContain("<i>* range · ^ active</i>");
+		expect(text).toContain(
+			"Balances: <code>1.5 PEPE</code> · <code>756 SOL</code>",
+		);
+		expect(text).toContain("Mode: dry run · ⏸ paused");
+		expect(
+			formatStatusReply(snapshot, { dryRun: false, paused: false }),
+		).not.toContain("paused");
+	});
+
+	test("chat preview uses the preview title and the caller note", () => {
+		const text = formatPreviewReply({
+			...neededEvent,
+			preview: true,
+			note: "Tap ✅ Confirm live",
+		});
+		expectPhoneLayout(text);
+		expect(text).toContain("🔍 <b>Rebalance preview</b>");
+		expect(text).toContain("Tap ✅ Confirm live");
 	});
 });
 
@@ -406,6 +533,7 @@ describe("telegram HTML structure", () => {
 			kind: "rebalanceNeeded",
 			pool: "Pool111",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			activeBinId: 1100,
 			lowerBinId: 966,
 			upperBinId: 1034,
@@ -426,6 +554,7 @@ describe("telegram HTML structure", () => {
 			kind: "rebalanced",
 			pool: "Pool111",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			signature: "Sig333",
 		});
 		expect(text).toContain("<b>Rebalanced</b>");
@@ -434,7 +563,11 @@ describe("telegram HTML structure", () => {
 	});
 
 	test("failed uses <b> header and <code> message", () => {
-		const text = formatTelegramMessage({ kind: "failed", message: "boom" });
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message: "boom",
+		});
 		expect(text).toContain("<b>");
 		expect(text).toContain("<code>boom</code>");
 	});
@@ -482,7 +615,11 @@ describe("telegram HTML escaping", () => {
 
 	test("failed event escapes hostile input", () => {
 		const hostile = '<script>alert("x")&</script>';
-		const text = formatTelegramMessage({ kind: "failed", message: hostile });
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message: hostile,
+		});
 		expect(text).not.toContain("<script>");
 		expect(text).toContain("&lt;script&gt;");
 		expect(text).toContain("&amp;");
@@ -493,6 +630,7 @@ describe("telegram HTML escaping", () => {
 			kind: "rebalanced",
 			pool: "<evil>&",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			signature: "Sig333",
 		});
 		expect(text).not.toContain("<evil>");
@@ -656,18 +794,18 @@ describe("rangeDirection", () => {
 	});
 });
 
-describe("directionLine", () => {
+describe("activeSummary", () => {
 	test("above reports the bin gap", () => {
-		expect(directionLine(1100, 966, 1034)).toContain("ABOVE");
-		expect(directionLine(1100, 966, 1034)).toContain("66 bins");
+		expect(activeSummary(1100, 966, 1034)).toContain("ABOVE");
+		expect(activeSummary(1100, 966, 1034)).toContain("66 bins");
 	});
 
 	test("below reports the bin gap", () => {
-		expect(directionLine(900, 966, 1034)).toContain("BELOW");
+		expect(activeSummary(900, 966, 1034)).toContain("BELOW");
 	});
 
 	test("inside stays quiet", () => {
-		expect(directionLine(1000, 966, 1034)).toContain("inside");
+		expect(activeSummary(1000, 966, 1034)).toContain("inside");
 	});
 });
 

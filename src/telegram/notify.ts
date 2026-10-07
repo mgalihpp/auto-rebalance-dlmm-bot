@@ -18,6 +18,8 @@ export class TelegramError extends Data.TaggedError("TelegramError")<{
 	message: string;
 }> {}
 
+export type FailureStage = "rebalance" | "fee claim" | "command";
+
 // Outgoing bot events. inRange is intentionally absent: the poll loop stays
 // quiet when the position is healthy to avoid spamming the owner.
 export type TelegramEvent =
@@ -31,6 +33,7 @@ export type TelegramEvent =
 			kind: "rebalanceNeeded";
 			pool: string;
 			position: string;
+			pair: string;
 			activeBinId: number;
 			lowerBinId: number;
 			upperBinId: number;
@@ -42,16 +45,23 @@ export type TelegramEvent =
 			dryRun: boolean;
 			swapsDisplay?: string;
 	  }
-	| { kind: "rebalanced"; pool: string; position: string; signature: string }
+	| {
+			kind: "rebalanced";
+			pool: string;
+			position: string;
+			pair: string;
+			signature: string;
+	  }
 	| {
 			kind: "feesClaimed";
 			action: "compound" | "sweep";
 			pool: string;
 			position: string;
+			pair: string;
 			valueDisplay: string;
 			signature: string;
 	  }
-	| { kind: "failed"; message: string };
+	| { kind: "failed"; stage: FailureStage; message: string };
 
 // Persistent reply keyboard so the owner taps buttons instead of typing slash
 // commands. Labels are parsed back in commands.ts, so keep both in sync.
@@ -127,26 +137,69 @@ export function escapeHtml(text: string): string {
 		.replace(/>/g, "&gt;");
 }
 
-// Single formatter table over the union. Add new event kinds here, not with
-// scattered conditionals at the call sites.
-export function directionLine(
+type Link = readonly [label: string, url: string];
+
+const code = (value: string) => `<code>${escapeHtml(value)}</code>`;
+const poolLink = (pool: string): Link => ["Pool", meteoraPoolUrl(pool)];
+const positionLink = (position: string): Link => [
+	"Position",
+	solscanAccountUrl(position),
+];
+const txLink = (signature: string): Link => ["Tx", solscanTxUrl(signature)];
+
+function titleLine(emoji: string, title: string, pair?: string): string {
+	return `${emoji} <b>${escapeHtml(title)}</b>${pair ? ` ${code(pair)}` : ""}`;
+}
+
+// Every message reads the same on a phone: title, blank line, short
+// `Label: value` rows, then all links on one final line.
+function layout(
+	title: string,
+	rows: ReadonlyArray<string | undefined>,
+	links: ReadonlyArray<Link> = [],
+): string {
+	const body = rows.filter((row): row is string => row !== undefined);
+	const parts = [title];
+	if (body.length > 0) {
+		parts.push("", ...body);
+	}
+	if (links.length > 0) {
+		const anchors = links.map(
+			([label, url]) => `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`,
+		);
+		parts.push("", `🔗 ${anchors.join(" · ")}`);
+	}
+	return parts.join("\n");
+}
+
+export function pairOf(snapshot: {
+	tokenXSymbol: string;
+	tokenYSymbol: string;
+}): string {
+	return `${snapshot.tokenXSymbol}/${snapshot.tokenYSymbol}`;
+}
+
+export function activeSummary(
 	active: number,
 	lower: number,
 	upper: number,
 ): string {
 	const direction = rangeDirection(active, lower, upper);
 	if (direction === "above") {
-		return `Active ${active} is ABOVE range by ${active - upper} bins`;
+		return `${active} · ${active - upper} bins ABOVE range`;
 	}
 	if (direction === "below") {
-		return `Active ${active} is BELOW range by ${lower - active} bins`;
+		return `${active} · ${lower - active} bins BELOW range`;
 	}
-	return `Active ${active} is inside range`;
+	return `${active} · inside range`;
 }
+
+const modeValue = (dryRun: boolean) => (dryRun ? "dry run" : "<b>LIVE</b>");
 
 export interface PreviewReplyInput {
 	pool: string;
 	position: string;
+	pair?: string;
 	activeBinId: number;
 	lowerBinId: number;
 	upperBinId: number;
@@ -157,11 +210,13 @@ export interface PreviewReplyInput {
 	slippageBps: number;
 	dryRun: boolean;
 	swapsDisplay?: string;
-	header?: string;
+	// Chat-requested preview vs the loop's automatic notice.
+	preview?: boolean;
+	// Trusted HTML shown after the Mode row.
+	note?: string;
 }
 
 export function formatPreviewReply(input: PreviewReplyInput): string {
-	const header = input.header ?? "⚠️ <b>Rebalance needed</b>";
 	const bar = renderRangeBar(
 		input.lowerBinId,
 		input.upperBinId,
@@ -169,26 +224,29 @@ export function formatPreviewReply(input: PreviewReplyInput): string {
 		input.newUpperBinId,
 		input.activeBinId,
 	);
-	const swaps = input.swapsDisplay
-		? `\nSwaps: <code>${escapeHtml(input.swapsDisplay)}</code>`
-		: "";
-	const mode = input.dryRun
-		? "Dry run — no transactions sent."
-		: "<b>LIVE</b> — executing.";
-	return (
-		`${header}\n${escapeHtml(directionLine(input.activeBinId, input.lowerBinId, input.upperBinId))}\n` +
-		`<pre>${escapeHtml(bar)}</pre>\n` +
-		`<i>= old range · + new range · ^ active</i>\n` +
-		`Range: <code>${escapeHtml(formatBinRange(input.lowerBinId, input.upperBinId))}</code> → <code>${escapeHtml(formatBinRange(input.newLowerBinId, input.newUpperBinId))}</code>\n` +
-		`Balances: <code>${escapeHtml(input.amountXDisplay)}</code> | <code>${escapeHtml(input.amountYDisplay)}</code>\n` +
-		`Slippage: <code>${input.slippageBps} bps</code>${swaps}\n` +
-		`Pool: <a href="${escapeHtml(meteoraPoolUrl(input.pool))}"><code>${escapeHtml(shortAddr(input.pool))}</code></a> ` +
-		`Position: <a href="${escapeHtml(solscanAccountUrl(input.position))}"><code>${escapeHtml(shortAddr(input.position))}</code></a>\n` +
-		mode
+	return layout(
+		input.preview
+			? titleLine("🔍", "Rebalance preview", input.pair)
+			: titleLine("⚠️", "Rebalance needed", input.pair),
+		[
+			`Active: ${escapeHtml(activeSummary(input.activeBinId, input.lowerBinId, input.upperBinId))}`,
+			`Range: ${code(formatBinRange(input.lowerBinId, input.upperBinId))} → ${code(formatBinRange(input.newLowerBinId, input.newUpperBinId))}`,
+			`<pre>${escapeHtml(bar)}</pre>`,
+			"<i>= old range · + new range · ^ active</i>",
+			`Balances: ${code(input.amountXDisplay)} · ${code(input.amountYDisplay)}`,
+			input.swapsDisplay ? `Swaps: ${code(input.swapsDisplay)}` : undefined,
+			`Slippage: ${input.slippageBps} bps`,
+			`Mode: ${modeValue(input.dryRun)}`,
+			input.note,
+		],
+		[poolLink(input.pool), positionLink(input.position)],
 	);
 }
 
-export function formatStatusReply(snapshot: PositionSnapshot): string {
+export function formatStatusReply(
+	snapshot: PositionSnapshot,
+	state: { dryRun: boolean; paused: boolean },
+): string {
 	const bar = renderRangeBar(
 		snapshot.lowerBinId,
 		snapshot.upperBinId,
@@ -196,38 +254,65 @@ export function formatStatusReply(snapshot: PositionSnapshot): string {
 		snapshot.upperBinId,
 		snapshot.activeBinId,
 	);
-	const pair = `${snapshot.tokenXSymbol}/${snapshot.tokenYSymbol}`;
-	return (
-		`📊 <b>Position snapshot</b> <code>${escapeHtml(pair)}</code>\n` +
-		`${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))}\n` +
-		`<pre>${escapeHtml(bar)}</pre>\n` +
-		`<i>* range · ^ active</i>\n` +
-		`Range: <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>\n` +
-		`Balances: <code>${escapeHtml(formatTokenAmount(snapshot.amountX, snapshot.tokenXDecimals, snapshot.tokenXSymbol))}</code> | ` +
-		`<code>${escapeHtml(formatTokenAmount(snapshot.amountY, snapshot.tokenYDecimals, snapshot.tokenYSymbol))}</code>\n` +
-		`Pool: <a href="${escapeHtml(meteoraPoolUrl(snapshot.pool))}"><code>${escapeHtml(shortAddr(snapshot.pool))}</code></a> ` +
-		`Position: <a href="${escapeHtml(solscanAccountUrl(snapshot.position))}"><code>${escapeHtml(shortAddr(snapshot.position))}</code></a>`
+	return layout(
+		titleLine("📊", "Position", pairOf(snapshot)),
+		[
+			`Active: ${escapeHtml(activeSummary(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))}`,
+			`Range: ${code(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}`,
+			`<pre>${escapeHtml(bar)}</pre>`,
+			"<i>* range · ^ active</i>",
+			`Balances: ${code(formatTokenAmount(snapshot.amountX, snapshot.tokenXDecimals, snapshot.tokenXSymbol))} · ${code(formatTokenAmount(snapshot.amountY, snapshot.tokenYDecimals, snapshot.tokenYSymbol))}`,
+			`Mode: ${modeValue(state.dryRun)}${state.paused ? " · ⏸ paused" : ""}`,
+			state.paused ? "Send <code>/resume</code> to continue." : undefined,
+		],
+		[poolLink(snapshot.pool), positionLink(snapshot.position)],
 	);
 }
 
 export function formatInRangeReply(snapshot: PositionSnapshot): string {
-	return `✅ <b>In range</b> — no rebalance needed.\n${escapeHtml(directionLine(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))} within <code>${escapeHtml(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}</code>`;
+	return layout(titleLine("✅", "In range", pairOf(snapshot)), [
+		`Active: ${escapeHtml(activeSummary(snapshot.activeBinId, snapshot.lowerBinId, snapshot.upperBinId))}`,
+		`Range: ${code(formatBinRange(snapshot.lowerBinId, snapshot.upperBinId))}`,
+		"No rebalance needed.",
+	]);
 }
 
 export function formatPausedReply(already: boolean): string {
-	return already
-		? `⏸ <b>Already paused.</b>\nAuto-rebalance loop stays paused. /status remains available. Send <code>/resume</code> to continue.`
-		: `⏸ <b>Paused.</b>\nAuto-rebalance loop paused. No checks and no live executes until resume. /status remains available. Send <code>/resume</code> to continue.`;
+	return layout(titleLine("⏸", already ? "Already paused" : "Paused"), [
+		"Auto-rebalance loop is paused. No checks and no live executes until resume.",
+		"/status stays available. Send <code>/resume</code> to continue.",
+	]);
 }
 
 export function formatResumedReply(already: boolean): string {
-	return already
-		? `▶️ <b>Already running.</b>\nAuto-rebalance loop is active. Send <code>/pause</code> to pause.`
-		: `▶️ <b>Resumed.</b>\nAuto-rebalance loop active again. Send <code>/pause</code> to pause.`;
+	return layout(titleLine("▶️", already ? "Already running" : "Resumed"), [
+		"Auto-rebalance loop is active. Send <code>/pause</code> to pause.",
+	]);
 }
 
 export function formatPausedSkip(): string {
 	return `⏸ <b>Paused</b> — skipping rebalance check.\nSend <code>/resume</code> to continue the loop.`;
+}
+
+export function formatQueuedReply(): string {
+	return layout(titleLine("⏳", "Rebalance queued"), [
+		"Live execution runs in the main loop within one poll interval.",
+	]);
+}
+
+export function formatHelpReply(helpText: string): string {
+	return layout(titleLine("❓", "Help"), [escapeHtml(helpText)]);
+}
+
+export function formatUnknownCommandReply(
+	text: string,
+	helpText: string,
+): string {
+	return layout(titleLine("❓", "Unknown command"), [
+		code(text),
+		"",
+		escapeHtml(helpText),
+	]);
 }
 
 export interface ConfigShowEntry {
@@ -245,11 +330,11 @@ export function formatConfigShow(
 	const rows = entries
 		.map(
 			(entry) =>
-				`<code>${escapeHtml(entry.key)}</code> = <code>${escapeHtml(entry.display)}</code>\n<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>`,
+				`${code(entry.key)} = ${code(entry.display)}\n<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>`,
 		)
 		.join("\n\n");
 	return (
-		`⚙️ <b>Editable config</b>\n${rows}\n\n` +
+		`⚙️ <b>Editable config</b>\n\n${rows}\n\n` +
 		`Tap a key below to edit, or set with <code>/config set KEY VALUE</code> (POOL_ADDRESS needs a <code>confirm</code> suffix).\n` +
 		`<i>DRY_RUN, RPC_URL, PRIVATE_KEY, TELEGRAM_* and JUPITER_API_KEY stay startup-only.</i>`
 	);
@@ -264,15 +349,13 @@ export interface ConfigPickEntry extends ConfigShowEntry {
 // type-in instructions arrive via customHint from the registry; this
 // formatter never puts addresses in buttons.
 export function formatConfigPick(entry: ConfigPickEntry): string {
-	const custom = entry.customHint
-		? `\n<i>${escapeHtml(entry.customHint)}</i>`
-		: "";
-	return (
-		`⚙️ <b>Config ${escapeHtml(entry.key)}</b>\n` +
-		`<code>${escapeHtml(entry.key)}</code> = <code>${escapeHtml(entry.display)}</code>\n` +
-		`<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>\n\n` +
-		`Tap a value below, or set with <code>/config set ${escapeHtml(entry.key)} VALUE</code>.${custom}`
-	);
+	return layout(titleLine("⚙️", `Config ${entry.key}`), [
+		`${code(entry.key)} = ${code(entry.display)}`,
+		`<i>${escapeHtml(entry.describe)} — ${escapeHtml(entry.sideEffect)}</i>`,
+		"",
+		`Tap a value below, or set with <code>/config set ${escapeHtml(entry.key)} VALUE</code>.`,
+		entry.customHint ? `<i>${escapeHtml(entry.customHint)}</i>` : undefined,
+	]);
 }
 
 // Pool-switch preview: no state change. Displays are pre-shortened by the
@@ -283,11 +366,12 @@ export function formatConfigPreview(
 	newDisplay: string,
 	fullValue: string,
 ): string {
-	return (
-		`⚠️ <b>Config preview</b> — no change applied.\n` +
-		`<code>${escapeHtml(key)}</code>: <code>${escapeHtml(oldDisplay)}</code> → <code>${escapeHtml(newDisplay)}</code>\n` +
-		`Send again with a <code>confirm</code> suffix to apply:\n<code>/config set ${escapeHtml(key)} ${escapeHtml(fullValue)} confirm</code>`
-	);
+	return layout(titleLine("⚠️", "Config preview"), [
+		"No change applied.",
+		`${code(key)}: ${code(oldDisplay)} → ${code(newDisplay)}`,
+		"Send again with a <code>confirm</code> suffix to apply:",
+		code(`/config set ${key} ${fullValue} confirm`),
+	]);
 }
 
 export function formatConfigUpdated(
@@ -297,28 +381,26 @@ export function formatConfigUpdated(
 	sideEffect: string,
 	hint?: string,
 ): string {
-	const extra = hint ? `\n${hint}` : "";
-	return (
-		`✅ <b>Config updated</b>\n` +
-		`<code>${escapeHtml(key)}</code>: <code>${escapeHtml(oldDisplay)}</code> → <code>${escapeHtml(newDisplay)}</code>\n` +
-		`<i>${escapeHtml(sideEffect)}</i>${extra}`
-	);
+	return layout(titleLine("✅", "Config updated"), [
+		`${code(key)}: ${code(oldDisplay)} → ${code(newDisplay)}`,
+		`<i>${escapeHtml(sideEffect)}</i>`,
+		hint,
+	]);
 }
 
 export function formatConfigUnknownKey(
 	rawKey: string,
 	valid: ReadonlyArray<{ key: string; describe: string }>,
 ): string {
-	const rows = valid
-		.map(
-			(entry) =>
-				`<code>${escapeHtml(entry.key)}</code> — ${escapeHtml(entry.describe)}`,
-		)
-		.join("\n");
-	return (
-		`❌ <b>Unknown config key</b> <code>${escapeHtml(rawKey || "(empty)")}</code>\n` +
-		`Valid keys:\n${rows}\n\nNo state changed.`
-	);
+	return layout(titleLine("❌", "Unknown config key"), [
+		code(rawKey || "(empty)"),
+		"Valid keys:",
+		...valid.map(
+			(entry) => `${code(entry.key)} — ${escapeHtml(entry.describe)}`,
+		),
+		"",
+		"No state changed.",
+	]);
 }
 
 export function formatConfigBadValue(
@@ -326,42 +408,74 @@ export function formatConfigBadValue(
 	raw: string,
 	describe: string,
 ): string {
-	return (
-		`❌ <b>Invalid value</b> for <code>${escapeHtml(key)}</code>: <code>${escapeHtml(raw || "(empty)")}</code>\n` +
-		`Expected: ${escapeHtml(describe)}\n\nNo state changed.`
-	);
+	return layout(titleLine("❌", `Invalid value for ${key}`), [
+		code(raw || "(empty)"),
+		`Expected: ${escapeHtml(describe)}`,
+		"",
+		"No state changed.",
+	]);
 }
 
+const FAILURE_TITLES: Record<FailureStage, string> = {
+	rebalance: "Rebalance failed",
+	"fee claim": "Fee claim failed",
+	command: "Command failed",
+};
+
+// Single formatter table over the union. Add new event kinds here, not with
+// scattered conditionals at the call sites.
 const telegramFormatters: {
 	[K in TelegramEvent["kind"]]: (
 		event: Extract<TelegramEvent, { kind: K }>,
 	) => string;
 } = {
-	startup: (event) => {
-		return `<b>🤖 DLMM bot started</b>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a>\nMode: ${event.dryRun ? "dry run (preview only)" : "<b>LIVE</b> (will send transactions)"}`;
-	},
-	shutdown: () => "🛑 <b>DLMM bot stopped.</b>",
+	startup: (event) =>
+		layout(
+			titleLine("🤖", "Bot started"),
+			[
+				`Mode: ${event.dryRun ? "dry run (preview only)" : "<b>LIVE</b> (sends transactions)"}`,
+				`Pool: ${code(shortAddr(event.pool))}`,
+			],
+			[poolLink(event.pool)],
+		),
+	shutdown: () => titleLine("🛑", "Bot stopped"),
 	rebalanceNeeded: (event) =>
 		formatPreviewReply({
-			pool: event.pool,
-			position: event.position,
-			activeBinId: event.activeBinId,
-			lowerBinId: event.lowerBinId,
-			upperBinId: event.upperBinId,
-			newLowerBinId: event.newLowerBinId,
-			newUpperBinId: event.newUpperBinId,
-			amountXDisplay: event.amountXDisplay,
-			amountYDisplay: event.amountYDisplay,
-			slippageBps: event.slippageBps,
-			dryRun: event.dryRun,
-			swapsDisplay: event.swapsDisplay,
+			...event,
+			note: event.dryRun ? "No transactions sent." : "Executing now.",
 		}),
 	rebalanced: (event) =>
-		`✅ <b>Rebalanced</b>\nTx: <a href="${escapeHtml(solscanTxUrl(event.signature))}"><code>${escapeHtml(shortAddr(event.signature))}</code></a>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a> <a href="${escapeHtml(meteoraPoolUrl(event.pool))}">Meteora</a> | <a href="${escapeHtml(solscanTxUrl(event.signature))}">Solscan</a>\nPosition: <a href="${escapeHtml(solscanAccountUrl(event.position))}"><code>${escapeHtml(shortAddr(event.position))}</code></a>`,
+		layout(
+			titleLine("✅", "Rebalanced", event.pair),
+			[`Tx: ${code(shortAddr(event.signature))}`],
+			[
+				txLink(event.signature),
+				poolLink(event.pool),
+				positionLink(event.position),
+			],
+		),
 	feesClaimed: (event) =>
-		`${event.action === "sweep" ? "💰 <b>Fees swept to SOL</b>" : "♻️ <b>Fees compounded</b>"}\nValue: ~${escapeHtml(event.valueDisplay)}\nTx: <a href="${escapeHtml(solscanTxUrl(event.signature))}"><code>${escapeHtml(shortAddr(event.signature))}</code></a>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a>\nPosition: <a href="${escapeHtml(solscanAccountUrl(event.position))}"><code>${escapeHtml(shortAddr(event.position))}</code></a>`,
+		layout(
+			event.action === "sweep"
+				? titleLine("💰", "Fees swept to SOL", event.pair)
+				: titleLine("♻️", "Fees compounded", event.pair),
+			[
+				`Value: ~${escapeHtml(event.valueDisplay)}`,
+				`Tx: ${code(shortAddr(event.signature))}`,
+			],
+			[
+				txLink(event.signature),
+				poolLink(event.pool),
+				positionLink(event.position),
+			],
+		),
 	failed: (event) =>
-		`❌ <b>Rebalance failed</b>\n<code>${escapeHtml(event.message.slice(0, 1000))}</code>`,
+		layout(titleLine("❌", FAILURE_TITLES[event.stage]), [
+			`Error: ${code(event.message.slice(0, 1000))}`,
+			event.message.includes("no DLMM position found")
+				? "No funded position in this pool. Check <code>POOL_ADDRESS</code> with /config, then retry /status."
+				: undefined,
+		]),
 };
 
 export function formatTelegramMessage(event: TelegramEvent): string {
@@ -369,21 +483,6 @@ export function formatTelegramMessage(event: TelegramEvent): string {
 		event: TelegramEvent,
 	) => string;
 	return format(event);
-}
-
-// Reply for a chat command that threw (e.g. loadPositionState with no funded
-// position). Callers log the raw error and send this text so the failure is
-// visible in Telegram instead of console-only.
-export function formatCommandError(message: string): string {
-	const trimmed = message.slice(0, 1000);
-	if (message.includes("no DLMM position found")) {
-		return (
-			`❌ <b>No position found</b>\n<code>${escapeHtml(trimmed)}</code>\n\n` +
-			`Wallet has no funded position in this pool. Check <code>POOL_ADDRESS</code> with <code>/config</code> then retry <code>/status</code>, ` +
-			`and make sure the wallet holds a DLMM position in that pool.`
-		);
-	}
-	return `❌ <b>Command failed</b>\n<code>${escapeHtml(trimmed)}</code>`;
 }
 
 // Minimal structural subset of fetch Response so tests can inject a fake

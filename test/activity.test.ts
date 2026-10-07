@@ -63,6 +63,9 @@ describe("activityFromEvent", () => {
 			{ kind: "failed", stage: "fee claim", message: "boom" },
 		];
 		const titles = events.map((event) => activityFromEvent(event, NOW)?.title);
+		expect(activityFromEvent(events[4] as TelegramEvent, NOW)?.kind).toBe(
+			"feesSwept",
+		);
 		expect(titles).toEqual([
 			"Bot started",
 			"Bot stopped",
@@ -273,5 +276,29 @@ describe("formatActivityReply", () => {
 		expect(lines[3]).toBe(
 			`${stamp} ⚠️ Rebalance needed · PEPE/SOL · above 966 to 1034 &lt;x&gt; ×4`,
 		);
+	});
+
+	test("compound and sweep entries get their own icons", () => {
+		const entry = (action: "compound" | "sweep") =>
+			activityFromEvent(
+				{
+					kind: "feesClaimed",
+					action,
+					pool: "Pool111",
+					position: "Pos222",
+					pair: "PEPE/SOL",
+					valueDisplay: "0.012 SOL",
+					signature: SIG,
+				},
+				NOW,
+			) as ActivityEntry;
+		const [compound, sweep] = formatActivityReply([
+			entry("compound"),
+			entry("sweep"),
+		])
+			.split("\n")
+			.slice(2);
+		expect(compound).toContain("♻️ Fees compounded");
+		expect(sweep).toContain("💰 Fees swept to SOL");
 	});
 });

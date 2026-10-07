@@ -14,7 +14,8 @@ export const ACTIVITY_KINDS = [
 	"shutdown",
 	"rebalanceNeeded",
 	"rebalanced",
-	"feesClaimed",
+	"feesSwept",
+	"feesCompounded",
 	"failed",
 	"paused",
 	"resumed",
@@ -36,7 +37,7 @@ export const ACTIVITY_FILE = "activity.jsonl";
 export const ACTIVITY_MAX = 50;
 const DETAIL_MAX = 300;
 
-type EntryBody = Omit<ActivityEntry, "at" | "kind" | "count">;
+type EntryBody = Omit<ActivityEntry, "at" | "count">;
 
 const activityMappers: {
 	[K in TelegramEvent["kind"]]: (
@@ -44,27 +45,33 @@ const activityMappers: {
 	) => EntryBody | null;
 } = {
 	startup: (event) => ({
+		kind: "startup",
 		title: "Bot started",
 		detail: `${event.dryRun ? "dry run" : "LIVE"} · pool ${shortAddr(event.pool)}`,
 	}),
-	shutdown: () => ({ title: "Bot stopped" }),
+	shutdown: () => ({ kind: "shutdown", title: "Bot stopped" }),
 	// Range, not the active bin, so the every-poll notice while out of
 	// range dedupes into one entry.
 	rebalanceNeeded: (event) => ({
+		kind: "rebalanceNeeded",
 		title: "Rebalance needed",
 		detail: `${event.pair} · ${rangeDirection(event.activeBinId, event.lowerBinId, event.upperBinId)} ${formatBinRange(event.lowerBinId, event.upperBinId)}`,
 	}),
 	rebalanced: (event) => ({
+		kind: "rebalanced",
 		title: "Rebalanced",
 		detail: event.pair,
 		signature: event.signature,
 	}),
 	feesClaimed: (event) => ({
-		title: event.action === "sweep" ? "Fees swept to SOL" : "Fees compounded",
+		...(event.action === "sweep"
+			? { kind: "feesSwept", title: "Fees swept to SOL" }
+			: { kind: "feesCompounded", title: "Fees compounded" }),
 		detail: `${event.pair} · ~${event.valueDisplay}`,
 		signature: event.signature,
 	}),
 	failed: (event) => ({
+		kind: "failed",
 		title: FAILURE_TITLES[event.stage],
 		detail: event.message,
 	}),
@@ -78,9 +85,7 @@ export function activityFromEvent(
 		event: TelegramEvent,
 	) => EntryBody | null;
 	const body = map(event);
-	return body === null
-		? null
-		: { at: now.toISOString(), kind: event.kind, ...body };
+	return body === null ? null : { at: now.toISOString(), ...body };
 }
 
 export function activityEntry(

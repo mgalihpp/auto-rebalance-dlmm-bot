@@ -263,7 +263,7 @@ function runIteration() {
 			console.log(
 				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
-			const threshold = tunables.feeSweepThresholdLamports;
+			const threshold = tunables.feeClaimThresholdLamports;
 			if (!tunables.reaccumulateFeesToSol || threshold === null) {
 				return;
 			}

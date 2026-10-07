@@ -7,7 +7,7 @@ import {
 	type EnvSource,
 	loadConfig,
 	parseCompoundFeesValue,
-	parseFeeSweepThresholdValue,
+	parseFeeClaimThresholdValue,
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
@@ -35,7 +35,7 @@ async function loadFailure(env: EnvSource): Promise<unknown> {
 	return expect.unreachable();
 }
 
-describe("fee sweep threshold", () => {
+describe("fee claim threshold", () => {
 	test("converts SOL to exact lamports", async () => {
 		const cases: Array<[string, string]> = [
 			["0.01", "10000000"],
@@ -45,7 +45,7 @@ describe("fee sweep threshold", () => {
 			["1000", "1000000000000"],
 		];
 		for (const [raw, lamports] of cases) {
-			const parsed = await Effect.runPromise(parseFeeSweepThresholdValue(raw));
+			const parsed = await Effect.runPromise(parseFeeClaimThresholdValue(raw));
 			expect(parsed?.toString()).toBe(lamports);
 		}
 	});
@@ -53,7 +53,7 @@ describe("fee sweep threshold", () => {
 	test("off, empty and zero disable", async () => {
 		for (const raw of ["", "  ", "off", "OFF", "0"]) {
 			expect(
-				await Effect.runPromise(parseFeeSweepThresholdValue(raw)),
+				await Effect.runPromise(parseFeeClaimThresholdValue(raw)),
 			).toBeNull();
 		}
 	});
@@ -69,7 +69,7 @@ describe("fee sweep threshold", () => {
 			"NaN",
 		]) {
 			const error = await Effect.runPromise(
-				Effect.flip(parseFeeSweepThresholdValue(raw)),
+				Effect.flip(parseFeeClaimThresholdValue(raw)),
 			);
 			expect(error).toBeInstanceOf(ConfigError);
 		}
@@ -77,16 +77,16 @@ describe("fee sweep threshold", () => {
 
 	test("loadConfig defaults to disabled and parses the env var", async () => {
 		const unset = await Effect.runPromise(loadConfig(makeEnv()));
-		expect(unset.feeSweepThresholdLamports).toBeNull();
+		expect(unset.feeClaimThresholdLamports).toBeNull();
 		const set = await Effect.runPromise(
-			loadConfig(makeEnv({ FEE_SWEEP_THRESHOLD_SOL: "0.01" })),
+			loadConfig(makeEnv({ FEE_CLAIM_THRESHOLD_SOL: "0.01" })),
 		);
-		expect(set.feeSweepThresholdLamports?.toString()).toBe("10000000");
-		expect(tunablesFromConfig(set).feeSweepThresholdLamports?.toString()).toBe(
+		expect(set.feeClaimThresholdLamports?.toString()).toBe("10000000");
+		expect(tunablesFromConfig(set).feeClaimThresholdLamports?.toString()).toBe(
 			"10000000",
 		);
 		const error = await loadFailure(
-			makeEnv({ FEE_SWEEP_THRESHOLD_SOL: "nope" }),
+			makeEnv({ FEE_CLAIM_THRESHOLD_SOL: "nope" }),
 		);
 		expect(error).toBeInstanceOf(ConfigError);
 	});
@@ -265,7 +265,7 @@ describe("strict single-value parsers (Telegram registry reuse)", () => {
 		expect(Object.keys(tunables).sort()).toEqual(
 			[
 				"compoundFees",
-				"feeSweepThresholdLamports",
+				"feeClaimThresholdLamports",
 				"reaccumulateFeesToSol",
 				"pollIntervalMs",
 				"poolAddress",

@@ -779,7 +779,7 @@ describe("editable registry", () => {
 	test("covers exactly the nine editable keys", () => {
 		const expected: EditableKey[] = [
 			"COMPOUND_FEES",
-			"FEE_SWEEP_THRESHOLD_SOL",
+			"FEE_CLAIM_THRESHOLD_SOL",
 			"REACCUMULATE_FEES_TO_SOL",
 			"POLL_INTERVAL_MS",
 			"POOL_ADDRESS",
@@ -896,8 +896,8 @@ describe("editable registry", () => {
 		expect(error).toBeInstanceOf(ConfigError);
 	});
 
-	test("fee sweep threshold parses to a persistable SOL string and applies lamports", async () => {
-		const entry = EDITABLE_REGISTRY.FEE_SWEEP_THRESHOLD_SOL;
+	test("fee claim threshold parses to a persistable SOL string and applies lamports", async () => {
+		const entry = EDITABLE_REGISTRY.FEE_CLAIM_THRESHOLD_SOL;
 		expect(entry.needsConfirm).toBe(false);
 		expect(entry.presets).toEqual(["0.01", "0.05", "off"]);
 		expect(await Effect.runPromise(entry.parse("0.01"))).toBe("0.01");
@@ -910,10 +910,10 @@ describe("editable registry", () => {
 		const before = tunablesFromConfig(config);
 		expect(entry.getDisplay(before)).toBe("off");
 		const on = await Effect.runPromise(entry.apply(before, "0.05"));
-		expect(on.feeSweepThresholdLamports?.toString()).toBe("50000000");
+		expect(on.feeClaimThresholdLamports?.toString()).toBe("50000000");
 		expect(entry.getDisplay(on)).toBe("0.05 SOL");
 		const off = await Effect.runPromise(entry.apply(on, "off"));
-		expect(off.feeSweepThresholdLamports).toBeNull();
+		expect(off.feeClaimThresholdLamports).toBeNull();
 	});
 
 	test("apply returns new tunables without mutating the original", async () => {

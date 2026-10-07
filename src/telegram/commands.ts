@@ -3,7 +3,7 @@ import type { TelegramConfig } from "../config.ts";
 import {
 	type ConfigError,
 	parseCompoundFeesValue,
-	parseFeeSweepThresholdValue,
+	parseFeeClaimThresholdValue,
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
@@ -77,7 +77,7 @@ export type EditableKey =
 	| "STRATEGY"
 	| "COMPOUND_FEES"
 	| "REACCUMULATE_FEES_TO_SOL"
-	| "FEE_SWEEP_THRESHOLD_SOL"
+	| "FEE_CLAIM_THRESHOLD_SOL"
 	| "PRIORITY_LEVEL"
 	| "POOL_ADDRESS";
 
@@ -88,7 +88,7 @@ export const EDITABLE_KEYS: readonly EditableKey[] = [
 	"STRATEGY",
 	"COMPOUND_FEES",
 	"REACCUMULATE_FEES_TO_SOL",
-	"FEE_SWEEP_THRESHOLD_SOL",
+	"FEE_CLAIM_THRESHOLD_SOL",
 	"PRIORITY_LEVEL",
 	"POOL_ADDRESS",
 ];
@@ -235,33 +235,33 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 			typeof parsed === "boolean" ? (parsed ? "true" : "false") : "invalid",
 		presets: ["true", "false"],
 	},
-	FEE_SWEEP_THRESHOLD_SOL: {
-		key: "FEE_SWEEP_THRESHOLD_SOL",
+	FEE_CLAIM_THRESHOLD_SOL: {
+		key: "FEE_CLAIM_THRESHOLD_SOL",
 		// Parsed value is the SOL string, not lamports: it is what persists to
 		// .env, so it must read back through the same parser on restart.
 		parse: (raw) =>
-			Effect.map(parseFeeSweepThresholdValue(raw), (lamports): unknown =>
+			Effect.map(parseFeeClaimThresholdValue(raw), (lamports): unknown =>
 				lamports === null ? "off" : lamportsToSol(lamports),
 			),
 		apply: (tunables, raw) =>
 			Effect.map(
-				parseFeeSweepThresholdValue(raw),
-				(feeSweepThresholdLamports) => ({
+				parseFeeClaimThresholdValue(raw),
+				(feeClaimThresholdLamports) => ({
 					...tunables,
-					feeSweepThresholdLamports,
+					feeClaimThresholdLamports,
 				}),
 			),
 		describe: () => "off, or SOL amount in (0, 1000] with at most 9 decimals",
 		needsConfirm: false,
 		sideEffect:
-			"applies to the next in-range poll; needs REACCUMULATE_FEES_TO_SOL=true",
+			"applies to the next in-range poll; needs COMPOUND_FEES=true or REACCUMULATE_FEES_TO_SOL=true",
 		getDisplay: (tunables) =>
-			tunables.feeSweepThresholdLamports === null
+			tunables.feeClaimThresholdLamports === null
 				? "off"
-				: `${lamportsToSol(tunables.feeSweepThresholdLamports)} SOL`,
+				: `${lamportsToSol(tunables.feeClaimThresholdLamports)} SOL`,
 		formatParsed: (parsed) => (typeof parsed === "string" ? parsed : "invalid"),
 		presets: ["0.01", "0.05", "off"],
-		customHint: "Custom: type /config set FEE_SWEEP_THRESHOLD_SOL <sol>",
+		customHint: "Custom: type /config set FEE_CLAIM_THRESHOLD_SOL <sol>",
 	},
 	PRIORITY_LEVEL: {
 		key: "PRIORITY_LEVEL",

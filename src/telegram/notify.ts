@@ -43,6 +43,13 @@ export type TelegramEvent =
 			swapsDisplay?: string;
 	  }
 	| { kind: "rebalanced"; pool: string; position: string; signature: string }
+	| {
+			kind: "feesSwept";
+			pool: string;
+			position: string;
+			valueDisplay: string;
+			signature: string;
+	  }
 	| { kind: "failed"; message: string };
 
 // Persistent reply keyboard so the owner taps buttons instead of typing slash
@@ -350,6 +357,8 @@ const telegramFormatters: {
 		}),
 	rebalanced: (event) =>
 		`✅ <b>Rebalanced</b>\nTx: <a href="${escapeHtml(solscanTxUrl(event.signature))}"><code>${escapeHtml(shortAddr(event.signature))}</code></a>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a> <a href="${escapeHtml(meteoraPoolUrl(event.pool))}">Meteora</a> | <a href="${escapeHtml(solscanTxUrl(event.signature))}">Solscan</a>\nPosition: <a href="${escapeHtml(solscanAccountUrl(event.position))}"><code>${escapeHtml(shortAddr(event.position))}</code></a>`,
+	feesSwept: (event) =>
+		`💰 <b>Fees swept to SOL</b>\nValue: ~${escapeHtml(event.valueDisplay)}\nTx: <a href="${escapeHtml(solscanTxUrl(event.signature))}"><code>${escapeHtml(shortAddr(event.signature))}</code></a>\nPool: <a href="${escapeHtml(meteoraPoolUrl(event.pool))}"><code>${escapeHtml(shortAddr(event.pool))}</code></a>\nPosition: <a href="${escapeHtml(solscanAccountUrl(event.position))}"><code>${escapeHtml(shortAddr(event.position))}</code></a>`,
 	failed: (event) =>
 		`❌ <b>Rebalance failed</b>\n<code>${escapeHtml(event.message.slice(0, 1000))}</code>`,
 };

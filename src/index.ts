@@ -4,6 +4,8 @@ import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
+	executeFeeThresholdSweep,
+	feeValueInLamports,
 	planSweepLegs,
 	type ReaccumulateInput,
 } from "./rebalance/reaccumulate.ts";
@@ -66,6 +68,7 @@ import {
 	formatBn,
 	formatSig,
 	formatTokenAmount,
+	lamportsToSol,
 	nowStamp,
 	shortAddr,
 } from "./utils.ts";
@@ -260,6 +263,59 @@ function runIteration() {
 			console.log(
 				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
+			const threshold = tunables.feeSweepThresholdLamports;
+			if (!tunables.reaccumulateFeesToSol || threshold === null) {
+				return;
+			}
+			const value = feeValueInLamports({
+				feeX: snapshot.feeX,
+				feeY: snapshot.feeY,
+				mintX: snapshot.tokenXMint,
+				mintY: snapshot.tokenYMint,
+				pricePerLamport: snapshot.activeBinPrice,
+			});
+			if (value === null) {
+				console.warn(
+					`[${nowStamp()}] Fee sweep threshold skipped: pool has no SOL side to value fees against.`,
+				);
+				return;
+			}
+			const valueDisplay = `${lamportsToSol(value)} SOL`;
+			const thresholdDisplay = `${lamportsToSol(threshold)} SOL`;
+			if (value.lt(threshold)) {
+				console.log(
+					`[${nowStamp()}] Unclaimed fees ~${valueDisplay} below sweep threshold ${thresholdDisplay}.`,
+				);
+				return;
+			}
+			console.log(
+				`[${nowStamp()}] Unclaimed fees ~${valueDisplay} reached sweep threshold ${thresholdDisplay}: claim X=${formatBn(snapshot.feeX)} Y=${formatBn(snapshot.feeY)} then sweep to SOL.`,
+			);
+			if (config.dryRun) {
+				console.log(`[${nowStamp()}] Dry run — no fee sweep sent.`);
+				return;
+			}
+			const signature = yield* executeFeeThresholdSweep({
+				dlmm: state.dlmm,
+				position: state.position,
+				reaccumulate: {
+					enabled: true,
+					poolAddress: tunables.poolAddress,
+					feeX: snapshot.feeX,
+					feeY: snapshot.feeY,
+					slippageBps: tunables.slippageBps,
+					jupiterApiKey: config.jupiterApiKey,
+				},
+			});
+			if (signature !== null) {
+				yield* notify({
+					kind: "feesSwept",
+					pool: snapshot.pool,
+					position: snapshot.position,
+					valueDisplay,
+					signature,
+				});
+			}
 			return;
 		}
 

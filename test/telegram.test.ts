@@ -177,6 +177,19 @@ describe("formatTelegramMessage", () => {
 		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
 	});
 
+	test("feesSwept shows value and signature link", () => {
+		const text = formatTelegramMessage({
+			kind: "feesSwept",
+			pool: "Pool111",
+			position: "Pos222",
+			valueDisplay: "0.012 SOL",
+			signature: "Sig333",
+		});
+		expect(text).toContain("0.012 SOL");
+		expect(text).toContain("https://solscan.io/tx/Sig333");
+		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
+	});
+
 	test("failed includes the error message", () => {
 		const text = formatTelegramMessage({
 			kind: "failed",
@@ -763,9 +776,10 @@ describe("parseBotCommand /config", () => {
 });
 
 describe("editable registry", () => {
-	test("covers exactly the eight editable keys", () => {
+	test("covers exactly the nine editable keys", () => {
 		const expected: EditableKey[] = [
 			"COMPOUND_FEES",
+			"FEE_SWEEP_THRESHOLD_SOL",
 			"REACCUMULATE_FEES_TO_SOL",
 			"POLL_INTERVAL_MS",
 			"POOL_ADDRESS",
@@ -880,6 +894,26 @@ describe("editable registry", () => {
 			Effect.flip(EDITABLE_REGISTRY.PRIORITY_LEVEL.parse("Ultra")),
 		);
 		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("fee sweep threshold parses to a persistable SOL string and applies lamports", async () => {
+		const entry = EDITABLE_REGISTRY.FEE_SWEEP_THRESHOLD_SOL;
+		expect(entry.needsConfirm).toBe(false);
+		expect(entry.presets).toEqual(["0.01", "0.05", "off"]);
+		expect(await Effect.runPromise(entry.parse("0.01"))).toBe("0.01");
+		expect(await Effect.runPromise(entry.parse("OFF"))).toBe("off");
+		expect(await Effect.runPromise(entry.parse("0"))).toBe("off");
+		const error = await Effect.runPromise(Effect.flip(entry.parse("-1")));
+		expect(error).toBeInstanceOf(ConfigError);
+
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		const before = tunablesFromConfig(config);
+		expect(entry.getDisplay(before)).toBe("off");
+		const on = await Effect.runPromise(entry.apply(before, "0.05"));
+		expect(on.feeSweepThresholdLamports?.toString()).toBe("50000000");
+		expect(entry.getDisplay(on)).toBe("0.05 SOL");
+		const off = await Effect.runPromise(entry.apply(on, "off"));
+		expect(off.feeSweepThresholdLamports).toBeNull();
 	});
 
 	test("apply returns new tunables without mutating the original", async () => {

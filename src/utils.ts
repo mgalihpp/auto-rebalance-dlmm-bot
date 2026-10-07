@@ -123,6 +123,11 @@ export function formatBinRange(lower: number, upper: number): string {
 	return `${lower} to ${upper}`;
 }
 
+// Plain SOL string ("0.01") that parseFeeSweepThresholdValue reads back exactly.
+export function lamportsToSol(lamports: BN): string {
+	return new Decimal(lamports.toString()).div(1e9).toFixed();
+}
+
 export function formatBn(value: BN): string {
 	return new Decimal(value.toString()).toFixed(0);
 }

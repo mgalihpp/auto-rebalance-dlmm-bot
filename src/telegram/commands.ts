@@ -3,6 +3,7 @@ import type { TelegramConfig } from "../config.ts";
 import {
 	type ConfigError,
 	parseCompoundFeesValue,
+	parseFeeSweepThresholdValue,
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
@@ -12,7 +13,7 @@ import {
 	parseTelegramPollIntervalValue,
 	type Tunables,
 } from "../config.ts";
-import { nowStamp } from "../utils.ts";
+import { lamportsToSol, nowStamp } from "../utils.ts";
 import type { TelegramFetch } from "./notify.ts";
 import { TelegramError } from "./notify.ts";
 
@@ -76,6 +77,7 @@ export type EditableKey =
 	| "STRATEGY"
 	| "COMPOUND_FEES"
 	| "REACCUMULATE_FEES_TO_SOL"
+	| "FEE_SWEEP_THRESHOLD_SOL"
 	| "PRIORITY_LEVEL"
 	| "POOL_ADDRESS";
 
@@ -86,6 +88,7 @@ export const EDITABLE_KEYS: readonly EditableKey[] = [
 	"STRATEGY",
 	"COMPOUND_FEES",
 	"REACCUMULATE_FEES_TO_SOL",
+	"FEE_SWEEP_THRESHOLD_SOL",
 	"PRIORITY_LEVEL",
 	"POOL_ADDRESS",
 ];
@@ -231,6 +234,34 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 		formatParsed: (parsed) =>
 			typeof parsed === "boolean" ? (parsed ? "true" : "false") : "invalid",
 		presets: ["true", "false"],
+	},
+	FEE_SWEEP_THRESHOLD_SOL: {
+		key: "FEE_SWEEP_THRESHOLD_SOL",
+		// Parsed value is the SOL string, not lamports: it is what persists to
+		// .env, so it must read back through the same parser on restart.
+		parse: (raw) =>
+			Effect.map(parseFeeSweepThresholdValue(raw), (lamports): unknown =>
+				lamports === null ? "off" : lamportsToSol(lamports),
+			),
+		apply: (tunables, raw) =>
+			Effect.map(
+				parseFeeSweepThresholdValue(raw),
+				(feeSweepThresholdLamports) => ({
+					...tunables,
+					feeSweepThresholdLamports,
+				}),
+			),
+		describe: () => "off, or SOL amount in (0, 1000] with at most 9 decimals",
+		needsConfirm: false,
+		sideEffect:
+			"applies to the next in-range poll; needs REACCUMULATE_FEES_TO_SOL=true",
+		getDisplay: (tunables) =>
+			tunables.feeSweepThresholdLamports === null
+				? "off"
+				: `${lamportsToSol(tunables.feeSweepThresholdLamports)} SOL`,
+		formatParsed: (parsed) => (typeof parsed === "string" ? parsed : "invalid"),
+		presets: ["0.01", "0.05", "off"],
+		customHint: "Custom: type /config set FEE_SWEEP_THRESHOLD_SOL <sol>",
 	},
 	PRIORITY_LEVEL: {
 		key: "PRIORITY_LEVEL",

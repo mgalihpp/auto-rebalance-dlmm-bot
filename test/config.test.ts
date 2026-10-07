@@ -7,6 +7,7 @@ import {
 	type EnvSource,
 	loadConfig,
 	parseCompoundFeesValue,
+	parseFeeClaimThresholdValue,
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
@@ -33,6 +34,63 @@ async function loadFailure(env: EnvSource): Promise<unknown> {
 	}
 	return expect.unreachable();
 }
+
+describe("fee claim threshold", () => {
+	test("converts SOL to exact lamports", async () => {
+		const cases: Array<[string, string]> = [
+			["0.01", "10000000"],
+			[" 0.05 ", "50000000"],
+			["1", "1000000000"],
+			["0.000000001", "1"],
+			["1000", "1000000000000"],
+		];
+		for (const [raw, lamports] of cases) {
+			const parsed = await Effect.runPromise(parseFeeClaimThresholdValue(raw));
+			expect(parsed?.toString()).toBe(lamports);
+		}
+	});
+
+	test("off, empty and zero disable", async () => {
+		for (const raw of ["", "  ", "off", "OFF", "0"]) {
+			expect(
+				await Effect.runPromise(parseFeeClaimThresholdValue(raw)),
+			).toBeNull();
+		}
+	});
+
+	test("rejects bad values with ConfigError", async () => {
+		for (const raw of [
+			"1.0000000001",
+			"-1",
+			"abc",
+			"0.0",
+			"1e-3",
+			"1000.000000001",
+			"NaN",
+		]) {
+			const error = await Effect.runPromise(
+				Effect.flip(parseFeeClaimThresholdValue(raw)),
+			);
+			expect(error).toBeInstanceOf(ConfigError);
+		}
+	});
+
+	test("loadConfig defaults to disabled and parses the env var", async () => {
+		const unset = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(unset.feeClaimThresholdLamports).toBeNull();
+		const set = await Effect.runPromise(
+			loadConfig(makeEnv({ FEE_CLAIM_THRESHOLD_SOL: "0.01" })),
+		);
+		expect(set.feeClaimThresholdLamports?.toString()).toBe("10000000");
+		expect(tunablesFromConfig(set).feeClaimThresholdLamports?.toString()).toBe(
+			"10000000",
+		);
+		const error = await loadFailure(
+			makeEnv({ FEE_CLAIM_THRESHOLD_SOL: "nope" }),
+		);
+		expect(error).toBeInstanceOf(ConfigError);
+	});
+});
 
 describe("loadConfig poll interval", () => {
 	test("defaults to 60000 when unset", async () => {
@@ -245,6 +303,8 @@ describe("strict single-value parsers (Telegram registry reuse)", () => {
 		expect(Object.keys(tunables).sort()).toEqual(
 			[
 				"compoundFees",
+				"feeClaimThresholdLamports",
+				"reaccumulateFeesToSol",
 				"pollIntervalMs",
 				"poolAddress",
 				"priorityLevel",

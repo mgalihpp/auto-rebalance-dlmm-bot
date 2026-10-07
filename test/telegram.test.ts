@@ -14,6 +14,7 @@ import {
 } from "../src/config.ts";
 import { persistEnvKey, RuntimeTunables } from "../src/services.ts";
 import {
+	type BotCommand,
 	clearPendingLiveConfirm,
 	EDITABLE_KEYS,
 	EDITABLE_REGISTRY,
@@ -32,9 +33,9 @@ import {
 	takePendingLiveConfirm,
 } from "../src/telegram/commands.ts";
 import {
+	activeSummary,
 	configMenuKeyboard,
 	configValueKeyboard,
-	directionLine,
 	escapeHtml,
 	formatConfigBadValue,
 	formatConfigPick,
@@ -44,14 +45,16 @@ import {
 	formatConfigUpdated,
 	formatPausedReply,
 	formatPausedSkip,
+	formatPreviewReply,
 	formatResumedReply,
+	formatStatusReply,
 	formatTelegramMessage,
-	notifyTelegramEvent,
+	mainMenuKeyboard,
 	notifyTelegramText,
-	sendTelegramEvent,
+	previewKeyboard,
+	REMOVE_REPLY_KEYBOARD,
 	sendTelegramText,
 	TELEGRAM_BOT_COMMANDS,
-	TELEGRAM_MAIN_MENU,
 	TelegramError,
 	type TelegramFetch,
 } from "../src/telegram/notify.ts";
@@ -125,64 +128,230 @@ describe("telegram config pairing", () => {
 	});
 });
 
+const POOL = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6Z";
+const POSITION = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+const SIG =
+	"8uirQ6d2vyYH2JXqpMvB4Lm4hS5c9bNw3e7kTq1zR8fG2pXyW5nV6tA3sD9jK4mL7oP1qR2sT3uV4wX5yZ6aS7Ba";
+
+const visibleText = (html: string) => html.replace(/<[^>]+>/g, "");
+const hrefsOf = (html: string) =>
+	[...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
+
+// Shared phone-layout contract: emoji + bold title, blank line, every link
+// once and only on the final line, and no full address in visible text.
+function expectPhoneLayout(text: string) {
+	const lines = text.split("\n");
+	expect(lines[0]).toMatch(/^\S+ <b>[^<]+<\/b>/);
+	if (lines.length > 1) {
+		expect(lines[1]).toBe("");
+	}
+	const hrefs = hrefsOf(text);
+	expect(new Set(hrefs).size).toBe(hrefs.length);
+	if (hrefs.length > 0) {
+		const last = lines.at(-1) ?? "";
+		expect(last.startsWith("🔗 ")).toBe(true);
+		expect(hrefsOf(last).length).toBe(hrefs.length);
+	}
+	const visible = visibleText(text);
+	for (const full of [POOL, POSITION, SIG]) {
+		expect(visible).not.toContain(full);
+	}
+}
+
+const neededEvent = {
+	kind: "rebalanceNeeded",
+	pool: POOL,
+	position: POSITION,
+	pair: "PEPE/SOL",
+	activeBinId: 1100,
+	lowerBinId: 966,
+	upperBinId: 1034,
+	newLowerBinId: 1066,
+	newUpperBinId: 1134,
+	amountXDisplay: "0.90269 X",
+	amountYDisplay: "0.756 Y",
+	slippageBps: 50,
+	dryRun: true,
+} as const;
+
 describe("formatTelegramMessage", () => {
-	test("startup includes pool and dry-run mode", () => {
+	test("startup shows mode and a short pool with one Pool link", () => {
 		const text = formatTelegramMessage({
 			kind: "startup",
-			pool: "Pool111",
+			pool: POOL,
 			dryRun: true,
 		});
-		expect(text).toContain("Po");
-		expect(text).toContain("dry run");
+		expectPhoneLayout(text);
+		expect(text).toContain("<b>Bot started</b>");
+		expect(text).toContain("Mode: dry run");
+		expect(text).toContain(`<code>${shortAddr(POOL)}</code>`);
+		expect(hrefsOf(text)).toEqual([`https://app.meteora.ag/dlmm/${POOL}`]);
 	});
 
-	test("shutdown is a short notice", () => {
-		expect(formatTelegramMessage({ kind: "shutdown" })).toContain("stopped");
+	test("shutdown is a title-only notice", () => {
+		const text = formatTelegramMessage({ kind: "shutdown" });
+		expectPhoneLayout(text);
+		expect(text).toBe("🛑 <b>Bot stopped</b>");
 	});
 
-	test("rebalanceNeeded includes preview ranges", () => {
-		const text = formatTelegramMessage({
-			kind: "rebalanceNeeded",
-			pool: "Pool111",
-			position: "Pos222",
-			activeBinId: 1100,
-			lowerBinId: 966,
-			upperBinId: 1034,
-			newLowerBinId: 1066,
-			newUpperBinId: 1134,
-			amountXDisplay: "0.90269 X",
-			amountYDisplay: "0.756 Y",
-			slippageBps: 50,
-			dryRun: true,
-		});
-		expect(text).toContain("ABOVE");
-		expect(text).toContain("966 to 1034");
-		expect(text).toContain("1066 to 1134");
-		expect(text).toContain("0.90269 X");
-		expect(text).toContain("0.756 Y");
+	test("rebalanceNeeded keeps the range bar and uses the shared labels", () => {
+		const text = formatTelegramMessage(neededEvent);
+		expectPhoneLayout(text);
+		expect(text.split("\n")[0]).toBe(
+			"⚠️ <b>Rebalance needed</b> <code>PEPE/SOL</code>",
+		);
+		expect(text).toContain("Active: 1100 · 66 bins ABOVE range");
+		expect(text).toContain(
+			"Range: <code>966 to 1034</code> → <code>1066 to 1134</code>",
+		);
 		expect(text).toContain("<pre>");
-		expect(text).toContain("^");
-		expect(text).toContain("Dry run");
+		expect(text).toContain("<i>= old range · + new range · ^ active</i>");
+		expect(text).toContain(
+			"Balances: <code>0.90269 X</code> · <code>0.756 Y</code>",
+		);
+		expect(text).toContain("Slippage: 50 bps");
+		expect(text).toContain("Mode: dry run");
+		expect(text).toContain("No transactions sent.");
+		expect(hrefsOf(text)).toEqual([
+			`https://app.meteora.ag/dlmm/${POOL}`,
+			`https://solscan.io/account/${POSITION}`,
+		]);
 	});
 
-	test("rebalanced includes short signature link", () => {
+	test("rebalanceNeeded live says it is executing", () => {
+		const text = formatTelegramMessage({ ...neededEvent, dryRun: false });
+		expectPhoneLayout(text);
+		expect(text).toContain("Mode: <b>LIVE</b>");
+		expect(text).toContain("Executing now.");
+	});
+
+	test("rebalanced links tx, pool and position once each", () => {
 		const text = formatTelegramMessage({
 			kind: "rebalanced",
-			pool: "Pool111",
-			position: "Pos222",
-			signature: "Sig333",
+			pool: POOL,
+			position: POSITION,
+			pair: "PEPE/SOL",
+			signature: SIG,
 		});
-		expect(text).toContain("Sig333");
-		expect(text).toContain("https://solscan.io/tx/Sig333");
-		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
+		expectPhoneLayout(text);
+		expect(text).toContain("<b>Rebalanced</b> <code>PEPE/SOL</code>");
+		expect(text).toContain(`Tx: <code>${shortAddr(SIG)}</code>`);
+		expect(hrefsOf(text)).toEqual([
+			`https://solscan.io/tx/${SIG}`,
+			`https://app.meteora.ag/dlmm/${POOL}`,
+			`https://solscan.io/account/${POSITION}`,
+		]);
 	});
 
-	test("failed includes the error message", () => {
+	test("feesClaimed names the action and shows the value", () => {
+		const base = {
+			kind: "feesClaimed",
+			pool: POOL,
+			position: POSITION,
+			pair: "PEPE/SOL",
+			valueDisplay: "0.012 SOL",
+			signature: SIG,
+		} as const;
+		const sweep = formatTelegramMessage({ ...base, action: "sweep" });
+		expectPhoneLayout(sweep);
+		expect(sweep).toContain("<b>Fees swept to SOL</b>");
+		expect(sweep).not.toContain("Fees compounded");
+		expect(sweep).toContain("Value: ~0.012 SOL");
+		expect(hrefsOf(sweep).length).toBe(3);
+		const compound = formatTelegramMessage({ ...base, action: "compound" });
+		expectPhoneLayout(compound);
+		expect(compound).toContain("<b>Fees compounded</b>");
+		expect(compound).not.toContain("Fees swept to SOL");
+	});
+
+	test("failed names the stage that failed", () => {
+		const titles = {
+			rebalance: "Rebalance failed",
+			"fee claim": "Fee claim failed",
+			command: "Command failed",
+		} as const;
+		for (const [stage, title] of Object.entries(titles)) {
+			const text = formatTelegramMessage({
+				kind: "failed",
+				stage: stage as keyof typeof titles,
+				message: "boom",
+			});
+			expectPhoneLayout(text);
+			expect(text).toBe(`❌ <b>${title}</b>\n\nError: <code>boom</code>`);
+		}
+	});
+
+	test("failed adds a hint when no position is funded", () => {
 		const text = formatTelegramMessage({
 			kind: "failed",
-			message: "boom",
+			stage: "command",
+			message: "no DLMM position found for owner",
 		});
-		expect(text).toContain("boom");
+		expect(text).toContain("POOL_ADDRESS");
+	});
+
+	test("failed never shows an RPC api key in chat", () => {
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message:
+				"fetch https://mainnet.helius-rpc.com/?api-key=secret-123 failed",
+		});
+		expect(text).not.toContain("secret-123");
+		expect(text).toContain("api-key=***");
+	});
+});
+
+describe("status and preview replies", () => {
+	const snapshot = {
+		pool: POOL,
+		position: POSITION,
+		owner: POSITION,
+		activeBinId: 1000,
+		activeBinPrice: "1",
+		lowerBinId: 966,
+		upperBinId: 1034,
+		amountX: new BN("1500000000"),
+		amountY: new BN("756000000"),
+		feeX: new BN(0),
+		feeY: new BN(0),
+		claimedFeeX: new BN(0),
+		claimedFeeY: new BN(0),
+		tokenXMint: POOL,
+		tokenYMint: POSITION,
+		tokenXDecimals: 9,
+		tokenYDecimals: 6,
+		tokenXSymbol: "PEPE",
+		tokenYSymbol: "SOL",
+	};
+
+	test("status keeps the range bar and shows mode and pause state", () => {
+		const text = formatStatusReply(snapshot, { dryRun: true, paused: true });
+		expectPhoneLayout(text);
+		expect(text.split("\n")[0]).toBe(
+			"📊 <b>Position</b> <code>PEPE/SOL</code>",
+		);
+		expect(text).toContain("Active: 1000 · inside range");
+		expect(text).toContain("<pre>");
+		expect(text).toContain("<i>* range · ^ active</i>");
+		expect(text).toContain(
+			"Balances: <code>1.5 PEPE</code> · <code>756 SOL</code>",
+		);
+		expect(text).toContain("Mode: dry run · ⏸ paused");
+		expect(
+			formatStatusReply(snapshot, { dryRun: false, paused: false }),
+		).not.toContain("paused");
+	});
+
+	test("chat preview uses the preview title and the caller note", () => {
+		const text = formatPreviewReply({
+			...neededEvent,
+			preview: true,
+			note: "Tap ✅ Confirm live",
+		});
+		expectPhoneLayout(text);
+		expect(text).toContain("🔍 <b>Rebalance preview</b>");
+		expect(text).toContain("Tap ✅ Confirm live");
 	});
 });
 
@@ -281,9 +450,7 @@ describe("telegram send", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			sendTelegramEvent({ kind: "shutdown" }, telegram, capture),
-		);
+		await Effect.runPromise(sendTelegramText("bye", telegram, capture));
 		expect(seenUrl).toContain("https://api.telegram.org/");
 		expect(seenUrl).not.toContain("PRIVATE_KEY");
 	});
@@ -296,7 +463,7 @@ describe("telegram send", () => {
 			json: async () => null,
 		});
 		const error = await Effect.runPromise(
-			Effect.flip(sendTelegramEvent({ kind: "shutdown" }, telegram, failing)),
+			Effect.flip(sendTelegramText("bye", telegram, failing)),
 		);
 		expect(error).toBeInstanceOf(TelegramError);
 	});
@@ -311,9 +478,7 @@ describe("telegram send", () => {
 			warnings.push(args.map(String).join(" "));
 		};
 		try {
-			await Effect.runPromise(
-				notifyTelegramEvent({ kind: "shutdown" }, telegram, failing),
-			);
+			await Effect.runPromise(notifyTelegramText("bye", telegram, failing));
 		} finally {
 			console.warn = original;
 		}
@@ -333,9 +498,7 @@ describe("telegram send", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
-		);
+		await Effect.runPromise(notifyTelegramText("bye", undefined, spy));
 		expect(called).toBe(false);
 		expect(okFetch).toBeDefined();
 	});
@@ -376,6 +539,7 @@ describe("telegram HTML structure", () => {
 			kind: "rebalanceNeeded",
 			pool: "Pool111",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			activeBinId: 1100,
 			lowerBinId: 966,
 			upperBinId: 1034,
@@ -396,6 +560,7 @@ describe("telegram HTML structure", () => {
 			kind: "rebalanced",
 			pool: "Pool111",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			signature: "Sig333",
 		});
 		expect(text).toContain("<b>Rebalanced</b>");
@@ -404,7 +569,11 @@ describe("telegram HTML structure", () => {
 	});
 
 	test("failed uses <b> header and <code> message", () => {
-		const text = formatTelegramMessage({ kind: "failed", message: "boom" });
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message: "boom",
+		});
 		expect(text).toContain("<b>");
 		expect(text).toContain("<code>boom</code>");
 	});
@@ -424,6 +593,24 @@ describe("telegram HTML structure", () => {
 		await Effect.runPromise(sendTelegramText("hello", telegram, capture));
 		expect(JSON.parse(seenBody).parse_mode).toBe("HTML");
 	});
+
+	test("sendMessage disables link previews", async () => {
+		let seenBody = "";
+		const capture: TelegramFetch = async (_url, init) => {
+			seenBody = String((init as RequestInit)?.body ?? "");
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const telegram = { botToken: "token", chatId: "987654" };
+		await Effect.runPromise(sendTelegramText("hello", telegram, capture));
+		const body = JSON.parse(seenBody);
+		expect(body.link_preview_options).toEqual({ is_disabled: true });
+		expect(body.disable_web_page_preview).toBeUndefined();
+	});
 });
 
 describe("telegram HTML escaping", () => {
@@ -434,7 +621,11 @@ describe("telegram HTML escaping", () => {
 
 	test("failed event escapes hostile input", () => {
 		const hostile = '<script>alert("x")&</script>';
-		const text = formatTelegramMessage({ kind: "failed", message: hostile });
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message: hostile,
+		});
 		expect(text).not.toContain("<script>");
 		expect(text).toContain("&lt;script&gt;");
 		expect(text).toContain("&amp;");
@@ -445,6 +636,7 @@ describe("telegram HTML escaping", () => {
 			kind: "rebalanced",
 			pool: "<evil>&",
 			position: "Pos222",
+			pair: "PEPE/SOL",
 			signature: "Sig333",
 		});
 		expect(text).not.toContain("<evil>");
@@ -567,9 +759,7 @@ describe("fast-loop disabled no-op", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
-		);
+		await Effect.runPromise(notifyTelegramText("bye", undefined, spy));
 		await Effect.runPromise(notifyTelegramText("hello", undefined, spy));
 		expect(called).toBe(false);
 	});
@@ -608,18 +798,18 @@ describe("rangeDirection", () => {
 	});
 });
 
-describe("directionLine", () => {
+describe("activeSummary", () => {
 	test("above reports the bin gap", () => {
-		expect(directionLine(1100, 966, 1034)).toContain("ABOVE");
-		expect(directionLine(1100, 966, 1034)).toContain("66 bins");
+		expect(activeSummary(1100, 966, 1034)).toContain("ABOVE");
+		expect(activeSummary(1100, 966, 1034)).toContain("66 bins");
 	});
 
 	test("below reports the bin gap", () => {
-		expect(directionLine(900, 966, 1034)).toContain("BELOW");
+		expect(activeSummary(900, 966, 1034)).toContain("BELOW");
 	});
 
 	test("inside stays quiet", () => {
-		expect(directionLine(1000, 966, 1034)).toContain("inside");
+		expect(activeSummary(1000, 966, 1034)).toContain("inside");
 	});
 });
 
@@ -763,9 +953,11 @@ describe("parseBotCommand /config", () => {
 });
 
 describe("editable registry", () => {
-	test("covers exactly the seven editable keys", () => {
+	test("covers exactly the nine editable keys", () => {
 		const expected: EditableKey[] = [
 			"COMPOUND_FEES",
+			"FEE_CLAIM_THRESHOLD_SOL",
+			"REACCUMULATE_FEES_TO_SOL",
 			"POLL_INTERVAL_MS",
 			"POOL_ADDRESS",
 			"PRIORITY_LEVEL",
@@ -879,6 +1071,26 @@ describe("editable registry", () => {
 			Effect.flip(EDITABLE_REGISTRY.PRIORITY_LEVEL.parse("Ultra")),
 		);
 		expect(error).toBeInstanceOf(ConfigError);
+	});
+
+	test("fee claim threshold parses to a persistable SOL string and applies lamports", async () => {
+		const entry = EDITABLE_REGISTRY.FEE_CLAIM_THRESHOLD_SOL;
+		expect(entry.needsConfirm).toBe(false);
+		expect(entry.presets).toEqual(["0.01", "0.05", "off"]);
+		expect(await Effect.runPromise(entry.parse("0.01"))).toBe("0.01");
+		expect(await Effect.runPromise(entry.parse("OFF"))).toBe("off");
+		expect(await Effect.runPromise(entry.parse("0"))).toBe("off");
+		const error = await Effect.runPromise(Effect.flip(entry.parse("-1")));
+		expect(error).toBeInstanceOf(ConfigError);
+
+		const config = await Effect.runPromise(loadConfig(makeEnv()));
+		const before = tunablesFromConfig(config);
+		expect(entry.getDisplay(before)).toBe("off");
+		const on = await Effect.runPromise(entry.apply(before, "0.05"));
+		expect(on.feeClaimThresholdLamports?.toString()).toBe("50000000");
+		expect(entry.getDisplay(on)).toBe("0.05 SOL");
+		const off = await Effect.runPromise(entry.apply(on, "off"));
+		expect(off.feeClaimThresholdLamports).toBeNull();
 	});
 
 	test("apply returns new tunables without mutating the original", async () => {
@@ -1000,11 +1212,117 @@ describe("config UX wiring", () => {
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("pause");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("resume");
-		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
-		expect(labels).toContain("⚙️ Config");
-		expect(labels).toContain("⏸ Pause");
-		expect(labels).toContain("▶️ Resume");
-		expect(labels.length).toBe(7);
+		expect(TELEGRAM_HELP_TEXT).toContain("/logs");
+		expect(TELEGRAM_HELP_TEXT).toContain("/menu");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("menu");
+	});
+});
+
+describe("inline main menu", () => {
+	const allowed = "987654";
+	const buttons = (keyboard: {
+		inline_keyboard: ReadonlyArray<
+			ReadonlyArray<{ text: string; callback_data: string }>
+		>;
+	}) => keyboard.inline_keyboard.map((row) => row.map((b) => b.text));
+
+	test("compact 2x3 layout with one pause/resume toggle", () => {
+		expect(buttons(mainMenuKeyboard(false))).toEqual([
+			["📊 Status", "👁 Preview"],
+			["📜 Logs", "⚙️ Config"],
+			["⏸ Pause", "❓ Help"],
+		]);
+		expect(buttons(mainMenuKeyboard(true))[2]).toEqual(["▶️ Resume", "❓ Help"]);
+	});
+
+	test("every button parses back to its command", () => {
+		const expected: Record<string, string> = {
+			"📊 Status": "status",
+			"👁 Preview": "rebalance",
+			"📜 Logs": "logs",
+			"⚙️ Config": "config_show",
+			"⏸ Pause": "pause",
+			"▶️ Resume": "resume",
+			"❓ Help": "help",
+		};
+		for (const paused of [false, true]) {
+			for (const button of mainMenuKeyboard(paused).inline_keyboard.flat()) {
+				const parsed = parseBotCommand(
+					makeCallback(601, 987654, button.callback_data),
+					allowed,
+				);
+				expect(parsed?.kind).toBe(expected[button.text] as BotCommand["kind"]);
+				if (parsed?.kind === "rebalance") {
+					expect(parsed.confirmed).toBe(false);
+				}
+			}
+		}
+	});
+
+	test("live preview stacks confirm above the menu, dry run is just the menu", () => {
+		expect(previewKeyboard(true, false)).toEqual(mainMenuKeyboard(false));
+		const live = previewKeyboard(false, false);
+		expect(live.inline_keyboard[0]).toEqual([
+			{ text: "✅ Confirm live", callback_data: "rebalance_confirm" },
+		]);
+		expect(live.inline_keyboard.slice(1)).toEqual(
+			mainMenuKeyboard(false).inline_keyboard,
+		);
+		expect(
+			parseBotCommand(makeCallback(602, 987654, "rebalance_confirm"), allowed),
+		).toMatchObject({ kind: "rebalance", confirmed: true });
+	});
+
+	test("/menu, typed menu and callback parse to menu", () => {
+		expect(parseBotCommand(makeUpdate(603, 987654, "/menu"), allowed)).toEqual({
+			kind: "menu",
+			chatId: allowed,
+			updateId: 603,
+		});
+		expect(
+			parseBotCommand(makeUpdate(604, 987654, "menu"), allowed)?.kind,
+		).toBe("menu");
+		expect(
+			parseBotCommand(makeCallback(605, 987654, "menu"), allowed)?.kind,
+		).toBe("menu");
+	});
+
+	test("stale reply-keyboard labels still parse", () => {
+		for (const [label, kind] of [
+			["📊 Status", "status"],
+			["👁 Preview", "rebalance"],
+			["✅ Confirm", "rebalance"],
+			["❓ Help", "help"],
+			["⏸ Pause", "pause"],
+			["▶️ Resume", "resume"],
+			["⚙️ Config", "config_show"],
+		] as const) {
+			expect(
+				parseBotCommand(makeUpdate(606, 987654, label), allowed)?.kind,
+			).toBe(kind);
+		}
+	});
+
+	test("sendMessage carries the given markup and omits it when absent", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const capture: TelegramFetch = async (_url, init) => {
+			bodies.push(JSON.parse(String((init as RequestInit)?.body ?? "")));
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const telegram = { botToken: "token", chatId: "987654" };
+		await Effect.runPromise(sendTelegramText("plain", telegram, capture));
+		await Effect.runPromise(
+			sendTelegramText("start", telegram, capture, {
+				replyMarkup: REMOVE_REPLY_KEYBOARD,
+			}),
+		);
+		expect("reply_markup" in (bodies[0] ?? {})).toBe(false);
+		expect(bodies[1]?.reply_markup).toEqual({ remove_keyboard: true });
 	});
 });
 
@@ -1453,7 +1771,9 @@ describe("config menu help sync", () => {
 		expect(TELEGRAM_HELP_TEXT).toContain("/config");
 		expect(TELEGRAM_HELP_TEXT).toContain("POOL_ADDRESS");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
-		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
+		const labels = mainMenuKeyboard(false)
+			.inline_keyboard.flat()
+			.map((b) => b.text);
 		expect(labels).toContain("⚙️ Config");
 		const text = formatConfigShow([
 			{
@@ -1569,5 +1889,36 @@ describe("pause and resume commands", () => {
 		expect(formatResumedReply(false)).toContain("/pause");
 		expect(formatResumedReply(true)).toContain("Already running");
 		expect(formatPausedSkip()).toContain("/resume");
+	});
+});
+
+describe("logs command", () => {
+	const allowed = "987654";
+
+	test("slash, label and callback all parse to logs", () => {
+		expect(parseBotCommand(makeUpdate(501, 987654, "/logs"), allowed)).toEqual({
+			kind: "logs",
+			chatId: allowed,
+			updateId: 501,
+		});
+		expect(
+			parseBotCommand(makeUpdate(502, 987654, "📜 Logs"), allowed)?.kind,
+		).toBe("logs");
+		expect(
+			parseBotCommand(makeCallback(503, 987654, "logs"), allowed),
+		).toMatchObject({ kind: "logs", callbackId: "cb1" });
+		expect(TELEGRAM_BOT_COMMANDS).toContainEqual({
+			command: "logs",
+			description: "show recent bot activity",
+		});
+	});
+
+	test("prototype keys in chat text are not commands", () => {
+		expect(
+			parseBotCommand(makeUpdate(504, 987654, "constructor"), allowed),
+		).toBeNull();
+		expect(
+			parseBotCommand(makeCallback(505, 987654, "constructor"), allowed)?.kind,
+		).toBe("unknown");
 	});
 });

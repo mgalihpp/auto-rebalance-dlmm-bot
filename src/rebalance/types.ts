@@ -8,6 +8,8 @@ export interface PositionSnapshot {
 	position: string;
 	owner: string;
 	activeBinId: number;
+	// Y lamports per 1 X lamport at the active bin (DLMM BinLiquidity.price).
+	activeBinPrice: string;
 	lowerBinId: number;
 	upperBinId: number;
 	amountX: BN;

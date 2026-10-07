@@ -1,8 +1,20 @@
 import { config as loadDotenv } from "dotenv";
 import { Effect, Ref } from "effect";
+import {
+	ACTIVITY_FILE,
+	activityEntry,
+	activityFromEvent,
+	makeActivityLog,
+} from "./activity.ts";
 import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
+import { executeInRangeFeeClaim, feeClaimAction } from "./rebalance/fees.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
+import {
+	feeValueInLamports,
+	planSweepLegs,
+	type ReaccumulateInput,
+} from "./rebalance/reaccumulate.ts";
 import {
 	type CompoundFeesInput,
 	describeZapSwap,
@@ -37,23 +49,29 @@ import {
 	answerTelegramCallback,
 	configMenuKeyboard,
 	configValueKeyboard,
-	confirmInlineKeyboard,
-	escapeHtml,
-	formatCommandError,
+	formatActivityReply,
 	formatConfigBadValue,
 	formatConfigPick,
 	formatConfigPreview,
 	formatConfigShow,
 	formatConfigUnknownKey,
 	formatConfigUpdated,
+	formatHelpReply,
 	formatInRangeReply,
+	formatMenuReply,
 	formatPausedReply,
 	formatPausedSkip,
 	formatPreviewReply,
+	formatQueuedReply,
 	formatResumedReply,
 	formatStatusReply,
-	notifyTelegramEvent,
+	formatTelegramMessage,
+	formatUnknownCommandReply,
+	mainMenuKeyboard,
 	notifyTelegramText,
+	pairOf,
+	previewKeyboard,
+	REMOVE_REPLY_KEYBOARD,
 	setTelegramMenuCommands,
 	type TelegramEvent,
 } from "./telegram/notify.ts";
@@ -62,6 +80,7 @@ import {
 	formatBn,
 	formatSig,
 	formatTokenAmount,
+	lamportsToSol,
 	nowStamp,
 	shortAddr,
 } from "./utils.ts";
@@ -76,8 +95,11 @@ function printPreview(
 		activeBinId: number;
 		lowerBinId: number;
 		upperBinId: number;
+		tokenXMint: string;
+		tokenYMint: string;
 	},
 	compound: CompoundFeesInput,
+	reaccumulate: ReaccumulateInput,
 ) {
 	const result = plan.estimate.result;
 	console.log(`[${nowStamp()}] === DLMM auto-rebalance preview (zap) ===`);
@@ -111,21 +133,59 @@ function printPreview(
 			`[${nowStamp()}] Compound fees:  enabled — no claimable fees to top up`,
 		);
 	}
+	if (!reaccumulate.enabled) {
+		console.log(`[${nowStamp()}] Reaccumulate to SOL: disabled`);
+	} else if (!reaccumulate.feeX.isZero() || !reaccumulate.feeY.isZero()) {
+		// Preview has no wallet balance yet; execution re-caps by real balance.
+		const legs = planSweepLegs({
+			feeX: reaccumulate.feeX,
+			feeY: reaccumulate.feeY,
+			balX: reaccumulate.feeX,
+			balY: reaccumulate.feeY,
+			mintX: snapshot.tokenXMint,
+			mintY: snapshot.tokenYMint,
+		});
+		const detail =
+			legs === null
+				? "no sweepable fees"
+				: legs
+						.map(
+							(leg) =>
+								`${leg.kind} ${formatBn(leg.amount)} ${shortAddr(leg.mint)}`,
+						)
+						.join(", ");
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — ${detail} after zap (capped by wallet balance)`,
+		);
+	} else {
+		console.log(
+			`[${nowStamp()}] Reaccumulate to SOL: enabled — no claimable fees to sweep`,
+		);
+	}
 }
 
-// Telegram send that never fails the caller. Disabled when telegram is unset.
-function notify(event: TelegramEvent) {
+const activityLog = makeActivityLog(ACTIVITY_FILE);
+
+// Every event lands in the activity log, even with Telegram disabled. The
+// in-range path never calls notify, so routine checks stay out of the log.
+// Telegram send never fails the caller.
+function notify(event: TelegramEvent, replyMarkup?: unknown) {
 	return Effect.gen(function* () {
-		const config = yield* AppConfig;
-		yield* notifyTelegramEvent(event, config.telegram);
+		const entry = activityFromEvent(event);
+		if (entry) {
+			yield* activityLog.record(entry);
+		}
+		yield* replyText(formatTelegramMessage(event), replyMarkup);
 	});
 }
 
+// The one place that decides markup: the main menu unless the caller
+// passes a specific keyboard.
 function replyText(text: string, replyMarkup?: unknown) {
 	return Effect.gen(function* () {
 		const config = yield* AppConfig;
 		yield* notifyTelegramText(text, config.telegram, undefined, {
-			replyMarkup,
+			replyMarkup: replyMarkup ?? mainMenuKeyboard(isBotPaused()),
 		});
 	});
 }
@@ -178,6 +238,8 @@ function getTunables() {
 	});
 }
 
+await Effect.runPromise(activityLog.load());
+
 await Effect.runPromise(
 	Effect.provide(
 		Effect.gen(function* () {
@@ -191,11 +253,11 @@ await Effect.runPromise(
 					),
 				);
 			}
-			yield* notify({
-				kind: "startup",
-				pool: boot.pool,
-				dryRun: boot.dryRun,
-			});
+			yield* notify(
+				{ kind: "startup", pool: boot.pool, dryRun: boot.dryRun },
+				REMOVE_REPLY_KEYBOARD,
+			);
+			yield* replyText(formatMenuReply());
 		}),
 		appLive,
 	),
@@ -224,6 +286,84 @@ function runIteration() {
 			console.log(
 				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
+			const action = feeClaimAction(tunables);
+			const threshold = tunables.feeClaimThresholdLamports;
+			if (action === null || threshold === null) {
+				return;
+			}
+			const value = feeValueInLamports({
+				feeX: snapshot.feeX,
+				feeY: snapshot.feeY,
+				mintX: snapshot.tokenXMint,
+				mintY: snapshot.tokenYMint,
+				pricePerLamport: snapshot.activeBinPrice,
+			});
+			if (value === null) {
+				console.warn(
+					`[${nowStamp()}] Fee claim threshold skipped: pool has no SOL side to value fees against.`,
+				);
+				return;
+			}
+			const valueDisplay = `${lamportsToSol(value)} SOL`;
+			const thresholdDisplay = `${lamportsToSol(threshold)} SOL`;
+			if (value.lt(threshold)) {
+				console.log(
+					`[${nowStamp()}] Unclaimed fees ~${valueDisplay} below claim threshold ${thresholdDisplay}.`,
+				);
+				return;
+			}
+			console.log(
+				`[${nowStamp()}] Unclaimed fees ~${valueDisplay} reached claim threshold ${thresholdDisplay}: claim X=${formatBn(snapshot.feeX)} Y=${formatBn(snapshot.feeY)} then ${action === "sweep" ? "sweep to SOL" : "compound"}.`,
+			);
+			if (config.dryRun) {
+				console.log(`[${nowStamp()}] Dry run — no fee claim sent.`);
+				return;
+			}
+			const claim = executeInRangeFeeClaim({
+				dlmm: state.dlmm,
+				position: state.position,
+				action,
+				compound: {
+					enabled: tunables.compoundFees,
+					poolAddress: tunables.poolAddress,
+					positionAddress: snapshot.position,
+					feeX: snapshot.feeX,
+					feeY: snapshot.feeY,
+					strategy: tunables.strategy,
+					slippageBps: tunables.slippageBps,
+				},
+				reaccumulate: {
+					enabled: tunables.reaccumulateFeesToSol,
+					poolAddress: tunables.poolAddress,
+					feeX: snapshot.feeX,
+					feeY: snapshot.feeY,
+					slippageBps: tunables.slippageBps,
+					jupiterApiKey: config.jupiterApiKey,
+				},
+			});
+			// Caught here, not in the main loop, so the alert names the fee claim.
+			const claimed = yield* Effect.catch(claim, (error) =>
+				Effect.gen(function* () {
+					console.error(`[${nowStamp()}] Fee claim failed:`, error);
+					yield* notify({
+						kind: "failed",
+						stage: "fee claim",
+						message: error.message,
+					});
+					return null;
+				}),
+			);
+			if (claimed !== null) {
+				yield* notify({
+					kind: "feesClaimed",
+					action: claimed.action,
+					pool: snapshot.pool,
+					position: snapshot.position,
+					pair: pairOf(snapshot),
+					valueDisplay,
+					signature: claimed.signature,
+				});
+			}
 			return;
 		}
 
@@ -248,6 +388,14 @@ function runIteration() {
 			strategy: tunables.strategy,
 			slippageBps: tunables.slippageBps,
 		};
+		const reaccumulate: ReaccumulateInput = {
+			enabled: tunables.reaccumulateFeesToSol,
+			poolAddress: tunables.poolAddress,
+			feeX: snapshot.feeX,
+			feeY: snapshot.feeY,
+			slippageBps: tunables.slippageBps,
+			jupiterApiKey: config.jupiterApiKey,
+		};
 		printPreview(
 			plan,
 			{
@@ -256,13 +404,17 @@ function runIteration() {
 				activeBinId: snapshot.activeBinId,
 				lowerBinId: snapshot.lowerBinId,
 				upperBinId: snapshot.upperBinId,
+				tokenXMint: snapshot.tokenXMint,
+				tokenYMint: snapshot.tokenYMint,
 			},
 			compound,
+			reaccumulate,
 		);
 		yield* notify({
 			kind: "rebalanceNeeded",
 			pool: snapshot.pool,
 			position: snapshot.position,
+			pair: pairOf(snapshot),
 			activeBinId: snapshot.activeBinId,
 			lowerBinId: snapshot.lowerBinId,
 			upperBinId: snapshot.upperBinId,
@@ -288,7 +440,7 @@ function runIteration() {
 			return;
 		}
 
-		const done = yield* executeZapRebalance({ plan, compound });
+		const done = yield* executeZapRebalance({ plan, compound, reaccumulate });
 		console.log(
 			`[${nowStamp()}] Rebalanced via zap position ${snapshot.position}: ${formatSig(done.signature)}`,
 		);
@@ -296,6 +448,7 @@ function runIteration() {
 			kind: "rebalanced",
 			pool: snapshot.pool,
 			position: snapshot.position,
+			pair: pairOf(snapshot),
 			signature: done.signature,
 		});
 	});
@@ -318,19 +471,30 @@ function handleBotCommand(command: BotCommand) {
 				);
 			}
 			if (command.kind === "help") {
-				yield* replyText(TELEGRAM_HELP_TEXT);
+				yield* replyText(formatHelpReply(TELEGRAM_HELP_TEXT));
 				return;
 			}
 			if (command.kind === "unknown") {
 				yield* replyText(
-					`<b>Unknown command</b>\n<code>${escapeHtml(command.text)}</code>\n\n${TELEGRAM_HELP_TEXT}`,
+					formatUnknownCommandReply(command.text, TELEGRAM_HELP_TEXT),
 				);
+				return;
+			}
+			if (command.kind === "menu") {
+				yield* replyText(formatMenuReply());
+				return;
+			}
+			if (command.kind === "logs") {
+				yield* replyText(formatActivityReply(activityLog.recent(15)));
 				return;
 			}
 			if (command.kind === "pause") {
 				const already = isBotPaused();
 				setBotPaused(true);
 				console.log(`[${nowStamp()}] Bot paused via Telegram command.`);
+				if (!already) {
+					yield* activityLog.record(activityEntry("paused", "Paused"));
+				}
 				yield* replyText(formatPausedReply(already));
 				return;
 			}
@@ -338,6 +502,9 @@ function handleBotCommand(command: BotCommand) {
 				const already = !isBotPaused();
 				setBotPaused(false);
 				console.log(`[${nowStamp()}] Bot resumed via Telegram command.`);
+				if (!already) {
+					yield* activityLog.record(activityEntry("resumed", "Resumed"));
+				}
 				yield* replyText(formatResumedReply(already));
 				return;
 			}
@@ -412,6 +579,13 @@ function handleBotCommand(command: BotCommand) {
 				const ref = yield* RuntimeTunables;
 				yield* Ref.set(ref, updated);
 				const newDisplay = entry.getDisplay(updated);
+				yield* activityLog.record(
+					activityEntry(
+						"configChanged",
+						"Config changed",
+						`${normalized}: ${shortAddr(oldDisplay)} → ${shortAddr(newDisplay)}`,
+					),
+				);
 				// Every editable key persists for restarts. Best-effort and never
 				// logs secrets; the in-memory switch already took effect.
 				yield* Effect.catch(
@@ -453,9 +627,7 @@ function handleBotCommand(command: BotCommand) {
 				shouldDeferLiveConfirm(command, config.dryRun)
 			) {
 				queuePendingLiveConfirm(command);
-				yield* replyText(
-					`<b>Rebalance queued</b>\nLive execution will run in the main loop within one poll interval.`,
-				);
+				yield* replyText(formatQueuedReply());
 				return;
 			}
 			const tunables = yield* getTunables();
@@ -464,11 +636,11 @@ function handleBotCommand(command: BotCommand) {
 			});
 			const snapshot = state.snapshot;
 			if (command.kind === "status") {
-				const base = formatStatusReply(snapshot);
 				yield* replyText(
-					isBotPaused()
-						? `${base}\n\n⏸ <b>Paused.</b> Send <code>/resume</code> to continue.`
-						: base,
+					formatStatusReply(snapshot, {
+						dryRun: config.dryRun,
+						paused: isBotPaused(),
+					}),
 				);
 				return;
 			}
@@ -495,10 +667,11 @@ function handleBotCommand(command: BotCommand) {
 					halfWidth,
 					jupiterApiKey: config.jupiterApiKey,
 				});
-				const preview = formatPreviewReply({
-					header: "🔍 <b>Rebalance preview</b>",
+				const previewInput = {
+					preview: true,
 					pool: snapshot.pool,
 					position: snapshot.position,
+					pair: pairOf(snapshot),
 					activeBinId: snapshot.activeBinId,
 					lowerBinId: snapshot.lowerBinId,
 					upperBinId: snapshot.upperBinId,
@@ -517,16 +690,24 @@ function handleBotCommand(command: BotCommand) {
 					slippageBps: plan.slippageBps,
 					dryRun: config.dryRun,
 					swapsDisplay: describeZapSwap(plan.estimate),
-				});
+				};
 				if (!command.confirmed) {
 					yield* replyText(
-						`${preview}\n${config.dryRun ? "Dry run — no transactions sent. Live execution via chat stays disabled while DRY_RUN=true." : "Tap ✅ Confirm below or send <code>/rebalance confirm</code> to execute live."}`,
-						confirmInlineKeyboard(config.dryRun),
+						formatPreviewReply({
+							...previewInput,
+							note: config.dryRun
+								? "No transactions sent. Live execution via chat stays off while DRY_RUN=true."
+								: "Tap ✅ Confirm live or send <code>/rebalance confirm</code> to execute.",
+						}),
+						previewKeyboard(config.dryRun, isBotPaused()),
 					);
 					return;
 				}
 				yield* replyText(
-					`${preview}\nDry run — no transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).`,
+					formatPreviewReply({
+						...previewInput,
+						note: "No transactions sent (DRY_RUN=true overrides <code>/rebalance confirm</code>).",
+					}),
 				);
 				// Live confirms defer earlier via shouldDeferLiveConfirm, so reaching
 				// here means preview-only. Never execute live in the fast loop.
@@ -544,13 +725,7 @@ function handleBotCommand(command: BotCommand) {
 				// Console-only failures are invisible in chat. Reply so /status
 				// and /rebalance errors (e.g. no funded position in this pool)
 				// surface in Telegram. Never fails the caller.
-				const exit = yield* Effect.exit(AppConfig);
-				if (exit._tag === "Success") {
-					yield* notifyTelegramText(
-						formatCommandError(message),
-						exit.value.telegram,
-					);
-				}
+				yield* notify({ kind: "failed", stage: "command", message });
 			}),
 	);
 }
@@ -641,6 +816,14 @@ function drainPendingConfirm() {
 				strategy: tunables.strategy,
 				slippageBps: tunables.slippageBps,
 			};
+			const reaccumulate: ReaccumulateInput = {
+				enabled: tunables.reaccumulateFeesToSol,
+				poolAddress: tunables.poolAddress,
+				feeX: snapshot.feeX,
+				feeY: snapshot.feeY,
+				slippageBps: tunables.slippageBps,
+				jupiterApiKey: config.jupiterApiKey,
+			};
 			printPreview(
 				plan,
 				{
@@ -649,10 +832,13 @@ function drainPendingConfirm() {
 					activeBinId: snapshot.activeBinId,
 					lowerBinId: snapshot.lowerBinId,
 					upperBinId: snapshot.upperBinId,
+					tokenXMint: snapshot.tokenXMint,
+					tokenYMint: snapshot.tokenYMint,
 				},
 				compound,
+				reaccumulate,
 			);
-			const done = yield* executeZapRebalance({ plan, compound });
+			const done = yield* executeZapRebalance({ plan, compound, reaccumulate });
 			console.log(
 				`[${nowStamp()}] Rebalanced via chat command position ${snapshot.position}: ${formatSig(done.signature)}`,
 			);
@@ -660,6 +846,7 @@ function drainPendingConfirm() {
 				kind: "rebalanced",
 				pool: snapshot.pool,
 				position: snapshot.position,
+				pair: pairOf(snapshot),
 				signature: done.signature,
 			});
 		}),
@@ -669,13 +856,7 @@ function drainPendingConfirm() {
 				yield* Effect.sync(() =>
 					console.warn(`[${nowStamp()}] Telegram command failed: ${message}`),
 				);
-				const exit = yield* Effect.exit(AppConfig);
-				if (exit._tag === "Success") {
-					yield* notifyTelegramText(
-						formatCommandError(message),
-						exit.value.telegram,
-					);
-				}
+				yield* notify({ kind: "failed", stage: "rebalance", message });
 			}),
 	);
 }
@@ -718,7 +899,10 @@ while (!stopped) {
 		console.error(`[${nowStamp()}] Rebalance failed:`, error);
 		const message = error instanceof Error ? error.message : String(error);
 		await Effect.runPromise(
-			Effect.provide(notify({ kind: "failed", message }), appLive),
+			Effect.provide(
+				notify({ kind: "failed", stage: "rebalance", message }),
+				appLive,
+			),
 		);
 	}
 	if (stopped) {

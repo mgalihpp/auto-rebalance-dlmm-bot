@@ -123,6 +123,11 @@ export function formatBinRange(lower: number, upper: number): string {
 	return `${lower} to ${upper}`;
 }
 
+// Plain SOL string ("0.01") that parseFeeClaimThresholdValue reads back exactly.
+export function lamportsToSol(lamports: BN): string {
+	return new Decimal(lamports.toString()).div(1e9).toFixed();
+}
+
 export function formatBn(value: BN): string {
 	return new Decimal(value.toString()).toFixed(0);
 }
@@ -132,4 +137,12 @@ export function nowStamp(): string {
 	const d = new Date();
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Errors can embed a Helius RPC URL (api-key=...) or a Telegram API URL
+// (bot<id>:<token>), and both the chat and the log file outlive the process.
+export function redactSecrets(text: string): string {
+	return text
+		.replace(/api-key=[^&\s"]+/gi, "api-key=***")
+		.replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot***");
 }

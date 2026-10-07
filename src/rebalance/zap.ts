@@ -28,6 +28,11 @@ import {
 } from "../services.ts";
 import { formatSig, nowStamp } from "../utils.ts";
 import {
+	executeReaccumulateToSol,
+	type ReaccumulateInput,
+	WSOL_MINT,
+} from "./reaccumulate.ts";
+import {
 	type BundleLeg,
 	SWAP_CU_BUFFER_MULTIPLIER,
 	SWAP_CU_MIN_LIMIT,
@@ -60,6 +65,7 @@ export interface ZapPlan {
 export interface ZapExecuteInput {
 	plan: ZapPlan;
 	compound: CompoundFeesInput;
+	reaccumulate: ReaccumulateInput;
 }
 
 // Opt-in redeposit of the fees the zap claims to the user ATAs. The zap
@@ -95,7 +101,18 @@ export function compoundTopUpAmounts(
 	return { x, y };
 }
 
-function toZapError(error: unknown): ZapError {
+// DLMM addLiquidityByStrategy wraps the SOL-side deposit from native lamports
+// itself, so native SOL is what that side can spend. Claims and the zap
+// clean-up both close the wSOL ATA, so it usually reads 0 by now anyway.
+export function compoundSpendableBalance(
+	mint: string,
+	ataBalance: BN,
+	nativeLamports: BN,
+): BN {
+	return mint === WSOL_MINT ? nativeLamports : ataBalance;
+}
+
+export function toZapError(error: unknown): ZapError {
 	return new ZapError({
 		message: error instanceof Error ? error.message : String(error),
 	});
@@ -263,9 +280,9 @@ function readAtaBalance(
 	});
 }
 
-// Conditional post-zap step: deposit the claimed fees back into the new
-// range. Returns the top-up signature, or null when skipped.
-function executeCompoundTopUp(
+// Deposit claimed fees back into the position's current range (post-zap or
+// in-range claim). Returns the top-up signature, or null when skipped.
+export function executeCompoundTopUp(
 	input: CompoundFeesInput,
 ): Effect.Effect<
 	string | null,
@@ -295,8 +312,21 @@ function executeCompoundTopUp(
 			try: () => getLbPairState(connection, lbPair),
 			catch: toZapError,
 		});
-		const balX = yield* readAtaBalance(pairState.tokenXMint);
-		const balY = yield* readAtaBalance(pairState.tokenYMint);
+		const nativeLamports = yield* Effect.tryPromise({
+			try: () => connection.getBalance(signer.publicKey),
+			catch: toZapError,
+		});
+		const native = new BN(nativeLamports);
+		const balX = compoundSpendableBalance(
+			pairState.tokenXMint.toBase58(),
+			yield* readAtaBalance(pairState.tokenXMint),
+			native,
+		);
+		const balY = compoundSpendableBalance(
+			pairState.tokenYMint.toBase58(),
+			yield* readAtaBalance(pairState.tokenYMint),
+			native,
+		);
 		const amounts = compoundTopUpAmounts(input.feeX, input.feeY, balX, balY);
 		if (amounts === null) {
 			console.log(
@@ -419,8 +449,18 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 			);
 		}
 	}
-	const topUp = yield* executeCompoundTopUp(input.compound);
-	return { signature: topUp ?? last };
+	// Startup config rejects both flags; at runtime reaccumulate wins.
+	let topUp: string | null = null;
+	if (input.reaccumulate.enabled && input.compound.enabled) {
+		console.log(
+			`[${nowStamp()}] Compound fees skipped: reaccumulate-to-SOL takes precedence.`,
+		);
+	}
+	if (!input.reaccumulate.enabled) {
+		topUp = yield* executeCompoundTopUp(input.compound);
+	}
+	const sweep = yield* executeReaccumulateToSol(input.reaccumulate);
+	return { signature: sweep ?? topUp ?? last };
 });
 
 export function describeZapSwap(estimate: DlmmDirectRebalanceEstimate): string {

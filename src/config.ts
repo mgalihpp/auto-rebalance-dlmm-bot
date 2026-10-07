@@ -1,5 +1,7 @@
 import { PublicKey } from "@solana/web3.js";
+import BN from "bn.js";
 import bs58 from "bs58";
+import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import {
 	DEFAULT_JITO_BLOCK_ENGINE_URL,
@@ -24,6 +26,8 @@ export interface BotConfig {
 	slippageBps: number;
 	dryRun: boolean;
 	compoundFees: boolean;
+	reaccumulateFeesToSol: boolean;
+	feeClaimThresholdLamports: BN | null;
 	strategy: StrategyKind;
 	priorityLevel: PrioritySetting;
 	jitoBundle: boolean;
@@ -54,6 +58,8 @@ export const TELEGRAM_POLL_INTERVAL_MS_DEFAULT = 3000;
 // rebalance. Capped at 0.01 SOL against typos.
 export const JITO_TIP_LAMPORTS_DEFAULT = 100_000;
 export const JITO_TIP_LAMPORTS_MAX = 10_000_000;
+export const FEE_CLAIM_THRESHOLD_SOL_MAX = 1000;
+export const SOL_DECIMALS = 9;
 
 // Mutable runtime tunables: everything Telegram may edit. DRY_RUN, RPC_URL,
 // PRIVATE_KEY, TELEGRAM_* credentials and JUPITER_API_KEY stay startup-only.
@@ -65,6 +71,8 @@ export type Tunables = Pick<
 	| "telegramPollIntervalMs"
 	| "strategy"
 	| "compoundFees"
+	| "reaccumulateFeesToSol"
+	| "feeClaimThresholdLamports"
 	| "priorityLevel"
 >;
 
@@ -76,6 +84,8 @@ export function tunablesFromConfig(config: BotConfig): Tunables {
 		telegramPollIntervalMs: config.telegramPollIntervalMs,
 		strategy: config.strategy,
 		compoundFees: config.compoundFees,
+		reaccumulateFeesToSol: config.reaccumulateFeesToSol,
+		feeClaimThresholdLamports: config.feeClaimThresholdLamports,
 		priorityLevel: config.priorityLevel,
 	};
 }
@@ -311,6 +321,49 @@ export function parseCompoundFeesValue(
 	return parseBoolVar("COMPOUND_FEES", trimmed, false);
 }
 
+export function parseReaccumulateFeesToSolValue(
+	raw: string,
+): Effect.Effect<boolean, ConfigError> {
+	const trimmed = raw.trim();
+	if (trimmed === "") {
+		return Effect.fail(
+			new ConfigError({
+				message: `invalid REACCUMULATE_FEES_TO_SOL: expected true/false, got "${raw}"`,
+			}),
+		);
+	}
+	return parseBoolVar("REACCUMULATE_FEES_TO_SOL", trimmed, false);
+}
+
+// "", "off" and "0" disable the sweep. Anything else must be a positive SOL
+// amount with at most 9 decimals so the lamport conversion is exact.
+export function parseFeeClaimThresholdValue(
+	raw: string,
+): Effect.Effect<BN | null, ConfigError> {
+	const trimmed = raw.trim();
+	const lowered = trimmed.toLowerCase();
+	if (lowered === "" || lowered === "off" || lowered === "0") {
+		return Effect.succeed(null);
+	}
+	const invalid = new ConfigError({
+		message: `invalid FEE_CLAIM_THRESHOLD_SOL: expected off or a SOL amount in (0, ${FEE_CLAIM_THRESHOLD_SOL_MAX}] with at most ${SOL_DECIMALS} decimals, got "${raw}"`,
+	});
+	if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+		return Effect.fail(invalid);
+	}
+	const sol = new Decimal(trimmed);
+	if (
+		sol.decimalPlaces() > SOL_DECIMALS ||
+		sol.lte(0) ||
+		sol.gt(FEE_CLAIM_THRESHOLD_SOL_MAX)
+	) {
+		return Effect.fail(invalid);
+	}
+	return Effect.succeed(
+		new BN(sol.mul(new Decimal(10).pow(SOL_DECIMALS)).toFixed(0)),
+	);
+}
+
 export function parsePriorityLevelValue(
 	raw: string,
 ): Effect.Effect<PrioritySetting, ConfigError> {
@@ -382,6 +435,20 @@ export function loadConfig(
 			optional("COMPOUND_FEES", env),
 			false,
 		);
+		const reaccumulateFeesToSol = yield* parseBoolVar(
+			"REACCUMULATE_FEES_TO_SOL",
+			optional("REACCUMULATE_FEES_TO_SOL", env),
+			false,
+		);
+		if (compoundFees && reaccumulateFeesToSol) {
+			return yield* new ConfigError({
+				message:
+					"invalid config: COMPOUND_FEES and REACCUMULATE_FEES_TO_SOL are mutually exclusive; enable at most one",
+			});
+		}
+		const feeClaimThresholdLamports = yield* parseFeeClaimThresholdValue(
+			optional("FEE_CLAIM_THRESHOLD_SOL", env) ?? "",
+		);
 		const strategy = yield* parseStrategyVar(
 			"STRATEGY",
 			optional("STRATEGY", env),
@@ -444,6 +511,8 @@ export function loadConfig(
 			slippageBps,
 			dryRun,
 			compoundFees,
+			reaccumulateFeesToSol,
+			feeClaimThresholdLamports,
 			strategy,
 			priorityLevel,
 			jitoBundle,

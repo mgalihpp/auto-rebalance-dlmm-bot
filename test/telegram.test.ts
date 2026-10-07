@@ -177,17 +177,34 @@ describe("formatTelegramMessage", () => {
 		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
 	});
 
-	test("feesSwept shows value and signature link", () => {
+	test("feesClaimed sweep shows value and signature link", () => {
 		const text = formatTelegramMessage({
-			kind: "feesSwept",
+			kind: "feesClaimed",
+			action: "sweep",
 			pool: "Pool111",
 			position: "Pos222",
 			valueDisplay: "0.012 SOL",
 			signature: "Sig333",
 		});
+		expect(text).toContain("Fees swept to SOL");
+		expect(text).not.toContain("Fees compounded");
 		expect(text).toContain("0.012 SOL");
 		expect(text).toContain("https://solscan.io/tx/Sig333");
 		expect(text).toContain("https://app.meteora.ag/dlmm/Pool111");
+	});
+
+	test("feesClaimed compound names the compound action", () => {
+		const text = formatTelegramMessage({
+			kind: "feesClaimed",
+			action: "compound",
+			pool: "Pool111",
+			position: "Pos222",
+			valueDisplay: "0.02 SOL",
+			signature: "Sig444",
+		});
+		expect(text).toContain("Fees compounded");
+		expect(text).not.toContain("Fees swept to SOL");
+		expect(text).toContain("https://solscan.io/tx/Sig444");
 	});
 
 	test("failed includes the error message", () => {

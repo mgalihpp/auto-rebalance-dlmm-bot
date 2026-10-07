@@ -110,7 +110,7 @@ export function compoundSpendableBalance(
 	return mint === WSOL_MINT ? nativeLamports : ataBalance;
 }
 
-function toZapError(error: unknown): ZapError {
+export function toZapError(error: unknown): ZapError {
 	return new ZapError({
 		message: error instanceof Error ? error.message : String(error),
 	});
@@ -278,9 +278,9 @@ function readAtaBalance(
 	});
 }
 
-// Conditional post-zap step: deposit the claimed fees back into the new
-// range. Returns the top-up signature, or null when skipped.
-function executeCompoundTopUp(
+// Deposit claimed fees back into the position's current range (post-zap or
+// in-range claim). Returns the top-up signature, or null when skipped.
+export function executeCompoundTopUp(
 	input: CompoundFeesInput,
 ): Effect.Effect<
 	string | null,

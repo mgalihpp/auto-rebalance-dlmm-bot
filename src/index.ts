@@ -2,9 +2,9 @@ import { config as loadDotenv } from "dotenv";
 import { Effect, Ref } from "effect";
 import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
+import { executeInRangeFeeClaim, feeClaimAction } from "./rebalance/fees.ts";
 import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
-	executeFeeThresholdSweep,
 	feeValueInLamports,
 	planSweepLegs,
 	type ReaccumulateInput,
@@ -263,8 +263,9 @@ function runIteration() {
 			console.log(
 				`[${nowStamp()}] Position in range (active ${snapshot.activeBinId} within ${formatBinRange(snapshot.lowerBinId, snapshot.upperBinId)}) — no rebalance needed.`,
 			);
+			const action = feeClaimAction(tunables);
 			const threshold = tunables.feeClaimThresholdLamports;
-			if (!tunables.reaccumulateFeesToSol || threshold === null) {
+			if (action === null || threshold === null) {
 				return;
 			}
 			const value = feeValueInLamports({
@@ -276,7 +277,7 @@ function runIteration() {
 			});
 			if (value === null) {
 				console.warn(
-					`[${nowStamp()}] Fee sweep threshold skipped: pool has no SOL side to value fees against.`,
+					`[${nowStamp()}] Fee claim threshold skipped: pool has no SOL side to value fees against.`,
 				);
 				return;
 			}
@@ -284,22 +285,32 @@ function runIteration() {
 			const thresholdDisplay = `${lamportsToSol(threshold)} SOL`;
 			if (value.lt(threshold)) {
 				console.log(
-					`[${nowStamp()}] Unclaimed fees ~${valueDisplay} below sweep threshold ${thresholdDisplay}.`,
+					`[${nowStamp()}] Unclaimed fees ~${valueDisplay} below claim threshold ${thresholdDisplay}.`,
 				);
 				return;
 			}
 			console.log(
-				`[${nowStamp()}] Unclaimed fees ~${valueDisplay} reached sweep threshold ${thresholdDisplay}: claim X=${formatBn(snapshot.feeX)} Y=${formatBn(snapshot.feeY)} then sweep to SOL.`,
+				`[${nowStamp()}] Unclaimed fees ~${valueDisplay} reached claim threshold ${thresholdDisplay}: claim X=${formatBn(snapshot.feeX)} Y=${formatBn(snapshot.feeY)} then ${action === "sweep" ? "sweep to SOL" : "compound"}.`,
 			);
 			if (config.dryRun) {
-				console.log(`[${nowStamp()}] Dry run — no fee sweep sent.`);
+				console.log(`[${nowStamp()}] Dry run — no fee claim sent.`);
 				return;
 			}
-			const signature = yield* executeFeeThresholdSweep({
+			const claimed = yield* executeInRangeFeeClaim({
 				dlmm: state.dlmm,
 				position: state.position,
+				action,
+				compound: {
+					enabled: tunables.compoundFees,
+					poolAddress: tunables.poolAddress,
+					positionAddress: snapshot.position,
+					feeX: snapshot.feeX,
+					feeY: snapshot.feeY,
+					strategy: tunables.strategy,
+					slippageBps: tunables.slippageBps,
+				},
 				reaccumulate: {
-					enabled: true,
+					enabled: tunables.reaccumulateFeesToSol,
 					poolAddress: tunables.poolAddress,
 					feeX: snapshot.feeX,
 					feeY: snapshot.feeY,
@@ -307,13 +318,14 @@ function runIteration() {
 					jupiterApiKey: config.jupiterApiKey,
 				},
 			});
-			if (signature !== null) {
+			if (claimed !== null) {
 				yield* notify({
-					kind: "feesSwept",
+					kind: "feesClaimed",
+					action: claimed.action,
 					pool: snapshot.pool,
 					position: snapshot.position,
 					valueDisplay,
-					signature,
+					signature: claimed.signature,
 				});
 			}
 			return;

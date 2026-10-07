@@ -1,5 +1,3 @@
-import type DLMM from "@meteora-ag/dlmm";
-import type { LbPosition } from "@meteora-ag/dlmm";
 import {
 	buildJupiterSwapTransaction,
 	getLbPairState,
@@ -340,60 +338,5 @@ export const executeReaccumulateToSol = Effect.fn("executeReaccumulateToSol")(
 			}
 		}
 		return last;
-	},
-);
-
-// The DLMM SDK throws this exact message when the position has no fees.
-const NO_FEE_TO_CLAIM = "No fee to claim";
-
-// In-range path: claim fees to the wallet, then sweep them like the post-zap
-// path does. The claim tx closes the wSOL ATA, so the SOL side lands as native
-// SOL (wallet wSOL reads 0) and the sweep only swaps the other side.
-export const executeFeeThresholdSweep = Effect.fn("executeFeeThresholdSweep")(
-	function* (input: {
-		dlmm: DLMM;
-		position: LbPosition;
-		reaccumulate: ReaccumulateInput;
-	}): Effect.fn.Return<
-		string | null,
-		ZapError,
-		SolanaConnection | AppSigner | RuntimeTunables
-	> {
-		const signer = yield* AppSigner;
-		const claimTxs: Transaction[] = yield* Effect.catch(
-			Effect.tryPromise({
-				try: () =>
-					input.dlmm.claimSwapFee({
-						owner: signer.publicKey,
-						position: input.position,
-					}),
-				catch: toZapError,
-			}),
-			(error) =>
-				error.message === NO_FEE_TO_CLAIM
-					? Effect.succeed([])
-					: Effect.fail(error),
-		);
-		if (claimTxs.length === 0) {
-			console.log(`[${nowStamp()}] Fee sweep skipped: no fee to claim.`);
-			return null;
-		}
-		const tunablesRef = yield* RuntimeTunables;
-		const tunables = yield* Ref.get(tunablesRef);
-		let claimSignature: string | null = null;
-		for (const tx of claimTxs) {
-			const signature = yield* Effect.mapError(
-				sendManualTransaction({
-					tx,
-					label: "claim-fee",
-					priorityLevel: tunables.priorityLevel,
-				}),
-				(error) => toZapError(error),
-			);
-			console.log(`[${nowStamp()}] Claimed fees: ${formatSig(signature)}`);
-			claimSignature = signature;
-		}
-		const sweepSignature = yield* executeReaccumulateToSol(input.reaccumulate);
-		return sweepSignature ?? claimSignature;
 	},
 );

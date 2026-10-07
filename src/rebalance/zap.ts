@@ -430,22 +430,36 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		// No swap CU floor here: a short limit only drops the whole bundle, and
 		// Jito ranks bundles by tip per requested CU, so the 400k floor would
 		// cut the bid to a fraction.
-		const core = legs
-			.filter((leg) => !PREP_LABELS.has(leg.label))
-			.map((leg) => ({ ...leg, cuMinLimit: undefined }));
+		const core = legs.filter((leg) => !PREP_LABELS.has(leg.label));
 		for (const leg of prep) {
 			yield* sendZapTx(leg.tx, leg.label);
 		}
 		const bundle = yield* Effect.mapError(
 			sendJitoBundle({
-				legs: core,
+				legs: core.map((leg) => ({ ...leg, cuMinLimit: undefined })),
 				tipLamports: config.jitoTipLamports,
 				blockEngineUrl: config.jitoBlockEngineUrl,
 			}),
 			(error) => toZapError(error),
 		);
-		last = bundle.signatures.at(-1) ?? "";
-		bundleId = bundle.bundleId;
+		if (bundle.kind === "landed") {
+			last = bundle.signatures.at(-1) ?? "";
+			bundleId = bundle.bundleId;
+		} else {
+			// Proven untouched: no leg of any bundle attempt landed and every
+			// blockhash has expired, so the sequential path cannot double-send.
+			console.warn(
+				`[${nowStamp()}] [bundle] ${bundle.reason} — falling back to sequential send`,
+			);
+			for (const leg of core) {
+				last = yield* sendZapTx(
+					leg.tx,
+					leg.label,
+					leg.cuBufferMultiplier,
+					leg.cuMinLimit,
+				);
+			}
+		}
 	} else {
 		for (const leg of legs) {
 			last = yield* sendZapTx(

@@ -75,7 +75,7 @@ The bot starts in `DRY_RUN=true` by default, so it only prints what it *would* d
 | `COMPOUND_FEES` | No | `false` | If `true`, redeposit claimed fees back into the position after a rebalance; if `false`, claimed fees stay in the wallet |
 | `SLIPPAGE_BPS` | No | `50` | Slippage tolerance in basis points (0–10000) |
 | `STRATEGY` | No | `Curve` | Liquidity shape: `Spot`, `Curve`, or `BidAsk` |
-| `JITO_BUNDLE` | No | `false` | If `true`, send remove → swap → zap-in → clean-up as one atomic Jito bundle, so a rebalance never stops half-way. Needs an `RPC_URL` that supports `simulateBundle` (Helius). |
+| `JITO_BUNDLE` | No | `false` | If `true`, send remove → swap → zap-in → clean-up as one atomic Jito bundle, so a rebalance never stops half-way. If Jito drops every attempt, the bot waits out the blockhash, proves nothing landed, and falls back to the normal one-by-one send. Needs an `RPC_URL` that supports `simulateBundle` (Helius). |
 | `JITO_TIP_LAMPORTS` | No | `100000` | Jito tip per bundle in lamports (1000–10000000), paid only when the bundle lands |
 | `JITO_BLOCK_ENGINE_URL` | No | `https://mainnet.block-engine.jito.wtf` | Jito Block Engine that receives the bundle |
 | `JUPITER_API_KEY` | No | none | Optional Jupiter API key for zap routing |

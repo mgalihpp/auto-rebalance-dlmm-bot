@@ -636,17 +636,23 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
 	}
 }
 
+// "dropped" means Jito discarded every attempt and, after waiting out the
+// newest blockhash, no leg of any attempt landed: the zap state is untouched
+// and the legs are safe to send another way.
+export type BundleResult =
+	| { kind: "landed"; signatures: string[]; bundleId?: string }
+	| { kind: "dropped"; reason: string };
+
+// Unauthenticated block-engine limit is 1 request/s per IP per region.
+export const JITO_MIN_REQUEST_INTERVAL_MS = 1100;
+
 export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 	input: SendBundleInput,
-): Effect.fn.Return<
-	{ signatures: string[]; bundleId?: string },
-	SendError,
-	SolanaConnection | AppSigner
-> {
+): Effect.fn.Return<BundleResult, SendError, SolanaConnection | AppSigner> {
 	const connection = yield* SolanaConnection;
 	const signer = yield* AppSigner;
 	return yield* Effect.tryPromise({
-		try: async () => {
+		try: async (): Promise<BundleResult> => {
 			const pollMs = input.pollMs ?? DEFAULT_POLL_MS;
 			const resendMs = input.resendMs ?? DEFAULT_RESEND_MS;
 			const { legs, tipLamports } = input;
@@ -724,38 +730,28 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 				return null;
 			};
 
-			let lastSignatures: string[] | undefined;
-			let lastBundleId: string | undefined;
-			const sendOnce = async (
-				attempt: number,
-			): Promise<{
-				signatures: string[];
-				bundleId?: string;
-			}> => {
-				const { blockhash, lastValidBlockHeight } =
-					await connection.getLatestBlockhash("confirmed");
-				const simTxs = build(
-					blockhash,
-					bases.map(() => SIMULATION_CU_LIMIT),
-				);
-				const simSignatures = signaturesOf(simTxs);
-				let simPayload: unknown;
+			// exact=false estimates CU on throwaway 1.4M-limit copies; exact=true
+			// re-checks the signed bundle we are about to send, real limits and
+			// blockhash included, so a bundle that cannot execute never leaves.
+			const simulate = async (txs: Transaction[], exact: boolean) => {
+				const signatures = signaturesOf(txs);
+				let payload: unknown;
 				try {
-					simPayload = await postJson(connection.rpcEndpoint, {
+					payload = await postJson(connection.rpcEndpoint, {
 						jsonrpc: "2.0",
 						id: "1",
 						method: "simulateBundle",
 						params: [
 							{
-								encodedTransactions: simTxs.map((tx) =>
+								encodedTransactions: txs.map((tx) =>
 									tx.serialize().toString("base64"),
 								),
 							},
 							{
-								preExecutionAccountsConfigs: simTxs.map(() => null),
-								postExecutionAccountsConfigs: simTxs.map(() => null),
-								skipSigVerify: true,
-								replaceRecentBlockhash: true,
+								preExecutionAccountsConfigs: txs.map(() => null),
+								postExecutionAccountsConfigs: txs.map(() => null),
+								skipSigVerify: !exact,
+								replaceRecentBlockhash: !exact,
 							},
 						],
 					});
@@ -764,20 +760,52 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 						`[bundle] simulateBundle request failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
-				const simulation = parseSimulateBundleResult(simPayload, bases.length);
+				const simulation = parseSimulateBundleResult(payload, txs.length);
 				if (!simulation.ok) {
+					const stage = exact ? "final bundle check" : "simulate";
 					if (isRetryableSimulationError(simulation.reason)) {
-						throw new RetryableSendError(`[bundle] ${simulation.reason}`);
+						throw new RetryableSendError(
+							`[bundle] ${stage}: ${simulation.reason}`,
+						);
 					}
-					const failedIndex = simSignatures.findIndex((sig) =>
+					const failedIndex = signatures.findIndex((sig) =>
 						simulation.reason.includes(sig),
 					);
 					const leg = failedIndex >= 0 ? ` (${labels[failedIndex]})` : "";
 					throw new SendError({
-						message: `[bundle]${leg} ${simulation.reason}`,
+						message: `[bundle]${leg} ${stage}: ${simulation.reason}`,
 					});
 				}
-				const limits = simulation.unitsConsumed.map((used, index) =>
+				return simulation.unitsConsumed;
+			};
+
+			const blockEngine = input.blockEngineUrl.replace(/\/+$/, "");
+			let lastJitoRequest = 0;
+			const jito = async (path: string, body: unknown): Promise<unknown> => {
+				const wait =
+					lastJitoRequest + JITO_MIN_REQUEST_INTERVAL_MS - Date.now();
+				if (wait > 0) {
+					await sleep(wait);
+				}
+				lastJitoRequest = Date.now();
+				return postJson(`${blockEngine}${path}`, body);
+			};
+
+			let lastSignatures: string[] | undefined;
+			let lastBundleId: string | undefined;
+			const submitted: string[][] = [];
+			let newestValidHeight = 0;
+			const sendOnce = async (attempt: number): Promise<BundleResult> => {
+				const { blockhash, lastValidBlockHeight } =
+					await connection.getLatestBlockhash("confirmed");
+				const unitsConsumed = await simulate(
+					build(
+						blockhash,
+						bases.map(() => SIMULATION_CU_LIMIT),
+					),
+					false,
+				);
+				const limits = unitsConsumed.map((used, index) =>
 					resolveCuLimit(
 						used,
 						legs[index]?.cuBufferMultiplier ?? CU_BUFFER_MULTIPLIER,
@@ -788,19 +816,21 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 					`[${nowStamp()}] [bundle] attempt ${attempt}/${MAX_SEND_ATTEMPTS} simulate: ${labels
 						.map(
 							(label, index) =>
-								`${label} used=${simulation.unitsConsumed[index]} limit=${limits[index]}`,
+								`${label} used=${unitsConsumed[index]} limit=${limits[index]}`,
 						)
 						.join(", ")} | tip=${tipLamports} lamports`,
 				);
 
 				const finalTxs = build(blockhash, limits);
+				await simulate(finalTxs, true);
 				const signatures = signaturesOf(finalTxs);
 				const encoded = finalTxs.map((tx) => tx.serialize().toString("base64"));
 				lastSignatures = signatures;
 				lastBundleId = undefined;
-				const blockEngine = input.blockEngineUrl.replace(/\/+$/, "");
+				submitted.push(signatures);
+				newestValidHeight = Math.max(newestValidHeight, lastValidBlockHeight);
 				const submit = async (): Promise<string> => {
-					const payload = await postJson(`${blockEngine}/api/v1/bundles`, {
+					const payload = await jito("/api/v1/bundles", {
 						jsonrpc: "2.0",
 						id: 1,
 						method: "sendBundle",
@@ -847,7 +877,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 								`[${nowStamp()}] [${labels[index]}] confirmed: ${formatSig(signature)}`,
 							);
 						}
-						return { signatures, bundleId };
+						return { kind: "landed", signatures, bundleId };
 					}
 					if (landing.kind === "failed") {
 						throw describeLanding(landing, signatures.length);
@@ -871,15 +901,12 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 						let inflight: InflightBundleStatus | null = null;
 						try {
 							inflight = parseInflightBundleStatus(
-								await postJson(
-									`${blockEngine}/api/v1/getInflightBundleStatuses`,
-									{
-										jsonrpc: "2.0",
-										id: 1,
-										method: "getInflightBundleStatuses",
-										params: [[bundleId]],
-									},
-								),
+								await jito("/api/v1/getInflightBundleStatuses", {
+									jsonrpc: "2.0",
+									id: 1,
+									method: "getInflightBundleStatuses",
+									params: [[bundleId]],
+								}),
 								bundleId,
 							);
 						} catch {
@@ -899,7 +926,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 								throw partial;
 							}
 							throw new RetryableSendError(
-								`[bundle] Jito dropped the bundle (${inflight}) — usually outbid in the tip auction`,
+								`[bundle] Jito dropped the bundle (status ${inflight})`,
 							);
 						}
 						if (inflight !== "Landed") {
@@ -915,6 +942,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 				}
 			};
 
+			let lastDrop = "";
 			for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
 				try {
 					if (lastSignatures !== undefined) {
@@ -929,7 +957,11 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 							// Status check itself failed; rebuild below.
 						}
 						if (landing?.kind === "landed") {
-							return { signatures: lastSignatures, bundleId: lastBundleId };
+							return {
+								kind: "landed",
+								signatures: lastSignatures,
+								bundleId: lastBundleId,
+							};
 						}
 						const partial =
 							landing && describeLanding(landing, lastSignatures.length);
@@ -939,11 +971,12 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 					}
 					return await sendOnce(attempt);
 				} catch (error) {
-					if (
-						!(error instanceof RetryableSendError) ||
-						attempt >= MAX_SEND_ATTEMPTS
-					) {
+					if (!(error instanceof RetryableSendError)) {
 						throw error;
+					}
+					lastDrop = error.message;
+					if (attempt >= MAX_SEND_ATTEMPTS) {
+						break;
 					}
 					console.warn(
 						`[${nowStamp()}] [bundle] attempt ${attempt}/${MAX_SEND_ATTEMPTS} retryable, retrying with a fresh blockhash: ${error.message}`,
@@ -951,9 +984,53 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 					await sleep(SIM_RETRY_DELAY_MS);
 				}
 			}
-			throw new SendError({
-				message: `[bundle] failed after ${MAX_SEND_ATTEMPTS} attempts`,
-			});
+			if (submitted.length === 0) {
+				throw new SendError({
+					message: `[bundle] failed after ${MAX_SEND_ATTEMPTS} attempts: ${lastDrop}`,
+				});
+			}
+			// Every signed bundle stays landable until its blockhash expires, so
+			// wait out the newest one before proving that nothing landed.
+			console.warn(
+				`[${nowStamp()}] [bundle] all ${MAX_SEND_ATTEMPTS} attempts dropped (${lastDrop}); waiting for blockhash expiry to confirm nothing landed`,
+			);
+			for (;;) {
+				try {
+					if ((await connection.getBlockHeight()) > newestValidHeight) {
+						break;
+					}
+				} catch {
+					// Transient RPC error; keep waiting.
+				}
+				await sleep(pollMs * 2);
+			}
+			// Let a leg processed right at expiry reach "confirmed" first.
+			await sleep(resendMs);
+			for (const signatures of submitted) {
+				const statuses = await connection.getSignatureStatuses(signatures, {
+					searchTransactionHistory: true,
+				});
+				const landing = classifyBundleLanding(statuses.value);
+				if (landing.kind === "landed") {
+					return { kind: "landed", signatures };
+				}
+				const partial = describeLanding(landing, signatures.length);
+				if (partial) {
+					throw partial;
+				}
+				// Any status at all (even unconfirmed) means a leg reached a
+				// validator; a fallback could then double-send.
+				if (statuses.value.some((status) => status !== null)) {
+					throw new SendError({
+						message:
+							"[bundle] a dropped bundle leg has an unconfirmed status — check wallet and position manually",
+					});
+				}
+			}
+			return {
+				kind: "dropped",
+				reason: `${MAX_SEND_ATTEMPTS} attempts dropped (${lastDrop}), nothing landed`,
+			};
 		},
 		catch: toSendError,
 	});

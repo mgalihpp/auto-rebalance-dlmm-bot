@@ -454,6 +454,24 @@ describe("telegram HTML structure", () => {
 		await Effect.runPromise(sendTelegramText("hello", telegram, capture));
 		expect(JSON.parse(seenBody).parse_mode).toBe("HTML");
 	});
+
+	test("sendMessage disables link previews", async () => {
+		let seenBody = "";
+		const capture: TelegramFetch = async (_url, init) => {
+			seenBody = String((init as RequestInit)?.body ?? "");
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const telegram = { botToken: "token", chatId: "987654" };
+		await Effect.runPromise(sendTelegramText("hello", telegram, capture));
+		const body = JSON.parse(seenBody);
+		expect(body.link_preview_options).toEqual({ is_disabled: true });
+		expect(body.disable_web_page_preview).toBeUndefined();
+	});
 });
 
 describe("telegram HTML escaping", () => {

@@ -429,6 +429,7 @@ export function sendTelegramText(
 					chat_id: telegram.chatId,
 					text,
 					parse_mode: "HTML",
+					link_preview_options: { is_disabled: true },
 					reply_markup: options.replyMarkup ?? TELEGRAM_MAIN_MENU,
 				}),
 			});

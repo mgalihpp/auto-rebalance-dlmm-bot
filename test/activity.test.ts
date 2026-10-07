@@ -10,13 +10,13 @@ import {
 	appendActivity,
 	makeActivityLog,
 	parseActivityLines,
-	redactSecrets,
 } from "../src/activity.ts";
 import {
 	activityStamp,
 	formatActivityReply,
 	type TelegramEvent,
 } from "../src/telegram/notify.ts";
+import { redactSecrets } from "../src/utils.ts";
 
 const SIG =
 	"8uirQ6d2vyYH2JXqpMvB4Lm4hS5c9bNw3e7kTq1zR8fG2pXyW5nV6tA3sD9jK4mL7oP1qR2sT3uV4wX5yZ6aS7Ba";

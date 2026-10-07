@@ -289,6 +289,17 @@ describe("formatTelegramMessage", () => {
 		});
 		expect(text).toContain("POOL_ADDRESS");
 	});
+
+	test("failed never shows an RPC api key in chat", () => {
+		const text = formatTelegramMessage({
+			kind: "failed",
+			stage: "rebalance",
+			message:
+				"fetch https://mainnet.helius-rpc.com/?api-key=secret-123 failed",
+		});
+		expect(text).not.toContain("secret-123");
+		expect(text).toContain("api-key=***");
+	});
 });
 
 describe("status and preview replies", () => {

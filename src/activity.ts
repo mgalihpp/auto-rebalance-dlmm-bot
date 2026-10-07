@@ -5,6 +5,7 @@ import {
 	formatBinRange,
 	nowStamp,
 	rangeDirection,
+	redactSecrets,
 	shortAddr,
 } from "./utils.ts";
 
@@ -34,14 +35,6 @@ export interface ActivityEntry {
 export const ACTIVITY_FILE = "activity.jsonl";
 export const ACTIVITY_MAX = 50;
 const DETAIL_MAX = 300;
-
-// Errors can embed a Helius RPC URL (api-key=...) or a Telegram API URL
-// (bot<id>:<token>), and the log file outlives the process.
-export function redactSecrets(text: string): string {
-	return text
-		.replace(/api-key=[^&\s"]+/gi, "api-key=***")
-		.replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot***");
-}
 
 type EntryBody = Omit<ActivityEntry, "at" | "kind" | "count">;
 

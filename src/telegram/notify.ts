@@ -8,6 +8,7 @@ import {
 	meteoraPoolUrl,
 	nowStamp,
 	rangeDirection,
+	redactSecrets,
 	renderRangeBar,
 	shortAddr,
 	solscanAccountUrl,
@@ -493,7 +494,7 @@ const telegramFormatters: {
 		),
 	failed: (event) =>
 		layout(titleLine("❌", FAILURE_TITLES[event.stage]), [
-			`Error: ${code(event.message.slice(0, 1000))}`,
+			`Error: ${code(redactSecrets(event.message).slice(0, 1000))}`,
 			event.message.includes("no DLMM position found")
 				? "No funded position in this pool. Check <code>POOL_ADDRESS</code> with /config, then retry /status."
 				: undefined,

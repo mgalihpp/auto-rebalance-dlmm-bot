@@ -64,22 +64,36 @@ export type TelegramEvent =
 	  }
 	| { kind: "failed"; stage: FailureStage; message: string };
 
-// Persistent reply keyboard so the owner taps buttons instead of typing slash
-// commands. Labels are parsed back in commands.ts, so keep both in sync.
-export const TELEGRAM_MAIN_MENU = {
-	keyboard: [
-		[{ text: "📊 Status" }, { text: "👁 Preview" }],
-		[{ text: "✅ Confirm" }, { text: "❓ Help" }],
-		[{ text: "⏸ Pause" }, { text: "▶️ Resume" }],
-		[{ text: "⚙️ Config" }],
-	],
-	resize_keyboard: true,
-	is_persistent: true,
-} as const;
+// Inline menu attached to bot messages. callback_data values are parsed back
+// by CALLBACK_DATA in commands.ts. One toggle shows Pause or Resume.
+export function mainMenuKeyboard(paused: boolean) {
+	return {
+		inline_keyboard: [
+			[
+				{ text: "📊 Status", callback_data: "status" },
+				{ text: "👁 Preview", callback_data: "rebalance_preview" },
+			],
+			[
+				{ text: "📜 Logs", callback_data: "logs" },
+				{ text: "⚙️ Config", callback_data: "config_show" },
+			],
+			[
+				paused
+					? { text: "▶️ Resume", callback_data: "resume" }
+					: { text: "⏸ Pause", callback_data: "pause" },
+				{ text: "❓ Help", callback_data: "help" },
+			],
+		],
+	};
+}
+
+// Telegram clients keep an old reply keyboard until a message removes it.
+export const REMOVE_REPLY_KEYBOARD = { remove_keyboard: true } as const;
 
 export const TELEGRAM_BOT_COMMANDS = [
 	{ command: "status", description: "show position snapshot (read-only)" },
 	{ command: "logs", description: "show recent bot activity" },
+	{ command: "menu", description: "show the button menu" },
 	{ command: "help", description: "show help" },
 	{ command: "pause", description: "pause auto-rebalance loop" },
 	{ command: "resume", description: "resume auto-rebalance loop" },
@@ -90,17 +104,19 @@ export const TELEGRAM_BOT_COMMANDS = [
 	},
 ] as const;
 
-// Inline confirm button attached to live-mode previews. Tapping it emits a
-// callback_query with data "rebalance_confirm", parsed as a confirmed rebalance.
-export function confirmInlineKeyboard(dryRun: boolean) {
+// Live-mode previews put a confirm row above the main menu. Tapping it emits
+// "rebalance_confirm", parsed as a confirmed rebalance.
+export function previewKeyboard(dryRun: boolean, paused: boolean) {
+	const menu = mainMenuKeyboard(paused);
 	if (dryRun) {
-		return undefined;
+		return menu;
 	}
 	return {
 		inline_keyboard: [
 			[{ text: "✅ Confirm live", callback_data: "rebalance_confirm" }],
+			...menu.inline_keyboard,
 		],
-	} as const;
+	};
 }
 
 // Tap-to-edit menu: one pick button per editable key. Tapping emits
@@ -300,6 +316,10 @@ export function formatQueuedReply(): string {
 	return layout(titleLine("⏳", "Rebalance queued"), [
 		"Live execution runs in the main loop within one poll interval.",
 	]);
+}
+
+export function formatMenuReply(): string {
+	return titleLine("📋", "Menu");
 }
 
 export function formatHelpReply(helpText: string): string {
@@ -590,7 +610,7 @@ export function sendTelegramText(
 					text,
 					parse_mode: "HTML",
 					link_preview_options: { is_disabled: true },
-					reply_markup: options.replyMarkup ?? TELEGRAM_MAIN_MENU,
+					reply_markup: options.replyMarkup,
 				}),
 			});
 			if (!response.ok) {
@@ -613,31 +633,8 @@ export function sendTelegramText(
 	});
 }
 
-export function sendTelegramEvent(
-	event: TelegramEvent,
-	telegram: TelegramConfig,
-	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
-): Effect.Effect<void, TelegramError> {
-	return sendTelegramText(formatTelegramMessage(event), telegram, fetchImpl);
-}
-
 // Never-failing wrapper for the poll loop. A Telegram outage must never fail
 // an iteration, so failures become a console warning (without the token).
-export function notifyTelegramEvent(
-	event: TelegramEvent,
-	telegram: TelegramConfig | undefined,
-	fetchImpl: TelegramFetch = globalThis.fetch as TelegramFetch,
-): Effect.Effect<void, never> {
-	if (!telegram) {
-		return Effect.void;
-	}
-	return Effect.catch(sendTelegramEvent(event, telegram, fetchImpl), (error) =>
-		Effect.sync(() => {
-			console.warn(`[${nowStamp()}] Telegram send failed: ${error.message}`);
-		}),
-	);
-}
-
 export function notifyTelegramText(
 	text: string,
 	telegram: TelegramConfig | undefined,

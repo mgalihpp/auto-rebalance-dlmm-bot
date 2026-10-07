@@ -49,7 +49,6 @@ import {
 	answerTelegramCallback,
 	configMenuKeyboard,
 	configValueKeyboard,
-	confirmInlineKeyboard,
 	formatActivityReply,
 	formatConfigBadValue,
 	formatConfigPick,
@@ -59,16 +58,20 @@ import {
 	formatConfigUpdated,
 	formatHelpReply,
 	formatInRangeReply,
+	formatMenuReply,
 	formatPausedReply,
 	formatPausedSkip,
 	formatPreviewReply,
 	formatQueuedReply,
 	formatResumedReply,
 	formatStatusReply,
+	formatTelegramMessage,
 	formatUnknownCommandReply,
-	notifyTelegramEvent,
+	mainMenuKeyboard,
 	notifyTelegramText,
 	pairOf,
+	previewKeyboard,
+	REMOVE_REPLY_KEYBOARD,
 	setTelegramMenuCommands,
 	type TelegramEvent,
 } from "./telegram/notify.ts";
@@ -166,22 +169,23 @@ const activityLog = makeActivityLog(ACTIVITY_FILE);
 // Every event lands in the activity log, even with Telegram disabled. The
 // in-range path never calls notify, so routine checks stay out of the log.
 // Telegram send never fails the caller.
-function notify(event: TelegramEvent) {
+function notify(event: TelegramEvent, replyMarkup?: unknown) {
 	return Effect.gen(function* () {
 		const entry = activityFromEvent(event);
 		if (entry) {
 			yield* activityLog.record(entry);
 		}
-		const config = yield* AppConfig;
-		yield* notifyTelegramEvent(event, config.telegram);
+		yield* replyText(formatTelegramMessage(event), replyMarkup);
 	});
 }
 
+// The one place that decides markup: the main menu unless the caller
+// passes a specific keyboard.
 function replyText(text: string, replyMarkup?: unknown) {
 	return Effect.gen(function* () {
 		const config = yield* AppConfig;
 		yield* notifyTelegramText(text, config.telegram, undefined, {
-			replyMarkup,
+			replyMarkup: replyMarkup ?? mainMenuKeyboard(isBotPaused()),
 		});
 	});
 }
@@ -249,11 +253,11 @@ await Effect.runPromise(
 					),
 				);
 			}
-			yield* notify({
-				kind: "startup",
-				pool: boot.pool,
-				dryRun: boot.dryRun,
-			});
+			yield* notify(
+				{ kind: "startup", pool: boot.pool, dryRun: boot.dryRun },
+				REMOVE_REPLY_KEYBOARD,
+			);
+			yield* replyText(formatMenuReply());
 		}),
 		appLive,
 	),
@@ -476,6 +480,10 @@ function handleBotCommand(command: BotCommand) {
 				);
 				return;
 			}
+			if (command.kind === "menu") {
+				yield* replyText(formatMenuReply());
+				return;
+			}
 			if (command.kind === "logs") {
 				yield* replyText(formatActivityReply(activityLog.recent(15)));
 				return;
@@ -691,7 +699,7 @@ function handleBotCommand(command: BotCommand) {
 								? "No transactions sent. Live execution via chat stays off while DRY_RUN=true."
 								: "Tap ✅ Confirm live or send <code>/rebalance confirm</code> to execute.",
 						}),
-						confirmInlineKeyboard(config.dryRun),
+						previewKeyboard(config.dryRun, isBotPaused()),
 					);
 					return;
 				}

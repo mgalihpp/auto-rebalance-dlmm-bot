@@ -14,6 +14,7 @@ import {
 } from "../src/config.ts";
 import { persistEnvKey, RuntimeTunables } from "../src/services.ts";
 import {
+	type BotCommand,
 	clearPendingLiveConfirm,
 	EDITABLE_KEYS,
 	EDITABLE_REGISTRY,
@@ -48,12 +49,12 @@ import {
 	formatResumedReply,
 	formatStatusReply,
 	formatTelegramMessage,
-	notifyTelegramEvent,
+	mainMenuKeyboard,
 	notifyTelegramText,
-	sendTelegramEvent,
+	previewKeyboard,
+	REMOVE_REPLY_KEYBOARD,
 	sendTelegramText,
 	TELEGRAM_BOT_COMMANDS,
-	TELEGRAM_MAIN_MENU,
 	TelegramError,
 	type TelegramFetch,
 } from "../src/telegram/notify.ts";
@@ -438,9 +439,7 @@ describe("telegram send", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			sendTelegramEvent({ kind: "shutdown" }, telegram, capture),
-		);
+		await Effect.runPromise(sendTelegramText("bye", telegram, capture));
 		expect(seenUrl).toContain("https://api.telegram.org/");
 		expect(seenUrl).not.toContain("PRIVATE_KEY");
 	});
@@ -453,7 +452,7 @@ describe("telegram send", () => {
 			json: async () => null,
 		});
 		const error = await Effect.runPromise(
-			Effect.flip(sendTelegramEvent({ kind: "shutdown" }, telegram, failing)),
+			Effect.flip(sendTelegramText("bye", telegram, failing)),
 		);
 		expect(error).toBeInstanceOf(TelegramError);
 	});
@@ -468,9 +467,7 @@ describe("telegram send", () => {
 			warnings.push(args.map(String).join(" "));
 		};
 		try {
-			await Effect.runPromise(
-				notifyTelegramEvent({ kind: "shutdown" }, telegram, failing),
-			);
+			await Effect.runPromise(notifyTelegramText("bye", telegram, failing));
 		} finally {
 			console.warn = original;
 		}
@@ -490,9 +487,7 @@ describe("telegram send", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
-		);
+		await Effect.runPromise(notifyTelegramText("bye", undefined, spy));
 		expect(called).toBe(false);
 		expect(okFetch).toBeDefined();
 	});
@@ -753,9 +748,7 @@ describe("fast-loop disabled no-op", () => {
 				json: async () => ({ ok: true, result: true }),
 			};
 		};
-		await Effect.runPromise(
-			notifyTelegramEvent({ kind: "shutdown" }, undefined, spy),
-		);
+		await Effect.runPromise(notifyTelegramText("bye", undefined, spy));
 		await Effect.runPromise(notifyTelegramText("hello", undefined, spy));
 		expect(called).toBe(false);
 	});
@@ -1208,11 +1201,117 @@ describe("config UX wiring", () => {
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("pause");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("resume");
-		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
-		expect(labels).toContain("⚙️ Config");
-		expect(labels).toContain("⏸ Pause");
-		expect(labels).toContain("▶️ Resume");
-		expect(labels.length).toBe(7);
+		expect(TELEGRAM_HELP_TEXT).toContain("/logs");
+		expect(TELEGRAM_HELP_TEXT).toContain("/menu");
+		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("menu");
+	});
+});
+
+describe("inline main menu", () => {
+	const allowed = "987654";
+	const buttons = (keyboard: {
+		inline_keyboard: ReadonlyArray<
+			ReadonlyArray<{ text: string; callback_data: string }>
+		>;
+	}) => keyboard.inline_keyboard.map((row) => row.map((b) => b.text));
+
+	test("compact 2x3 layout with one pause/resume toggle", () => {
+		expect(buttons(mainMenuKeyboard(false))).toEqual([
+			["📊 Status", "👁 Preview"],
+			["📜 Logs", "⚙️ Config"],
+			["⏸ Pause", "❓ Help"],
+		]);
+		expect(buttons(mainMenuKeyboard(true))[2]).toEqual(["▶️ Resume", "❓ Help"]);
+	});
+
+	test("every button parses back to its command", () => {
+		const expected: Record<string, string> = {
+			"📊 Status": "status",
+			"👁 Preview": "rebalance",
+			"📜 Logs": "logs",
+			"⚙️ Config": "config_show",
+			"⏸ Pause": "pause",
+			"▶️ Resume": "resume",
+			"❓ Help": "help",
+		};
+		for (const paused of [false, true]) {
+			for (const button of mainMenuKeyboard(paused).inline_keyboard.flat()) {
+				const parsed = parseBotCommand(
+					makeCallback(601, 987654, button.callback_data),
+					allowed,
+				);
+				expect(parsed?.kind).toBe(expected[button.text] as BotCommand["kind"]);
+				if (parsed?.kind === "rebalance") {
+					expect(parsed.confirmed).toBe(false);
+				}
+			}
+		}
+	});
+
+	test("live preview stacks confirm above the menu, dry run is just the menu", () => {
+		expect(previewKeyboard(true, false)).toEqual(mainMenuKeyboard(false));
+		const live = previewKeyboard(false, false);
+		expect(live.inline_keyboard[0]).toEqual([
+			{ text: "✅ Confirm live", callback_data: "rebalance_confirm" },
+		]);
+		expect(live.inline_keyboard.slice(1)).toEqual(
+			mainMenuKeyboard(false).inline_keyboard,
+		);
+		expect(
+			parseBotCommand(makeCallback(602, 987654, "rebalance_confirm"), allowed),
+		).toMatchObject({ kind: "rebalance", confirmed: true });
+	});
+
+	test("/menu, typed menu and callback parse to menu", () => {
+		expect(parseBotCommand(makeUpdate(603, 987654, "/menu"), allowed)).toEqual({
+			kind: "menu",
+			chatId: allowed,
+			updateId: 603,
+		});
+		expect(
+			parseBotCommand(makeUpdate(604, 987654, "menu"), allowed)?.kind,
+		).toBe("menu");
+		expect(
+			parseBotCommand(makeCallback(605, 987654, "menu"), allowed)?.kind,
+		).toBe("menu");
+	});
+
+	test("stale reply-keyboard labels still parse", () => {
+		for (const [label, kind] of [
+			["📊 Status", "status"],
+			["👁 Preview", "rebalance"],
+			["✅ Confirm", "rebalance"],
+			["❓ Help", "help"],
+			["⏸ Pause", "pause"],
+			["▶️ Resume", "resume"],
+			["⚙️ Config", "config_show"],
+		] as const) {
+			expect(
+				parseBotCommand(makeUpdate(606, 987654, label), allowed)?.kind,
+			).toBe(kind);
+		}
+	});
+
+	test("sendMessage carries the given markup and omits it when absent", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const capture: TelegramFetch = async (_url, init) => {
+			bodies.push(JSON.parse(String((init as RequestInit)?.body ?? "")));
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				json: async () => ({ ok: true, result: true }),
+			};
+		};
+		const telegram = { botToken: "token", chatId: "987654" };
+		await Effect.runPromise(sendTelegramText("plain", telegram, capture));
+		await Effect.runPromise(
+			sendTelegramText("start", telegram, capture, {
+				replyMarkup: REMOVE_REPLY_KEYBOARD,
+			}),
+		);
+		expect("reply_markup" in (bodies[0] ?? {})).toBe(false);
+		expect(bodies[1]?.reply_markup).toEqual({ remove_keyboard: true });
 	});
 });
 
@@ -1661,7 +1760,9 @@ describe("config menu help sync", () => {
 		expect(TELEGRAM_HELP_TEXT).toContain("/config");
 		expect(TELEGRAM_HELP_TEXT).toContain("POOL_ADDRESS");
 		expect(TELEGRAM_BOT_COMMANDS.map((c) => c.command)).toContain("config");
-		const labels = TELEGRAM_MAIN_MENU.keyboard.flat().map((b) => b.text);
+		const labels = mainMenuKeyboard(false)
+			.inline_keyboard.flat()
+			.map((b) => b.text);
 		expect(labels).toContain("⚙️ Config");
 		const text = formatConfigShow([
 			{

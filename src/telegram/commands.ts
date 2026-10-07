@@ -29,6 +29,7 @@ export type BotCommand =
 	| { kind: "pause"; chatId: string; updateId: number; callbackId?: string }
 	| { kind: "resume"; chatId: string; updateId: number; callbackId?: string }
 	| { kind: "logs"; chatId: string; updateId: number; callbackId?: string }
+	| { kind: "menu"; chatId: string; updateId: number; callbackId?: string }
 	| {
 			kind: "rebalance";
 			chatId: string;
@@ -363,7 +364,7 @@ export function parseConfigMenuAction(data: string): ConfigMenuAction | null {
 }
 
 export const TELEGRAM_HELP_TEXT =
-	"DLMM bot commands (or use the menu buttons below):\n/status - show position snapshot (read-only)\n/logs - show recent bot activity\n/help - show this help\n/pause (or /stop) - pause auto-rebalance loop, Telegram stays responsive\n/resume (or /start) - resume auto-rebalance loop\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
+	"DLMM bot commands (or tap the buttons under any bot message):\n/status - show position snapshot (read-only)\n/logs - show recent bot activity\n/menu - show the button menu\n/help - show this help\n/pause (or /stop) - pause auto-rebalance loop, Telegram stays responsive\n/resume (or /start) - resume auto-rebalance loop\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
 
 // Commands that carry nothing beyond chat, update and callback ids.
 type SimpleKind = Exclude<
@@ -393,6 +394,7 @@ const SLASH_COMMANDS: Record<string, SimpleKind> = {
 	"/resume": "resume",
 	"/start": "resume",
 	"/logs": "logs",
+	"/menu": "menu",
 };
 
 // Menu button labels resolve to the same commands as their slash equivalents.
@@ -400,6 +402,7 @@ const SLASH_COMMANDS: Record<string, SimpleKind> = {
 const MENU_LABELS: Record<string, SimpleKind | "rebalance"> = {
 	"📜 logs": "logs",
 	logs: "logs",
+	menu: "menu",
 	"📊 status": "status",
 	status: "status",
 	"❓ help": "help",
@@ -422,6 +425,7 @@ const MENU_LABELS: Record<string, SimpleKind | "rebalance"> = {
 const CALLBACK_DATA: Record<string, SimpleKind | "rebalance"> = {
 	status: "status",
 	logs: "logs",
+	menu: "menu",
 	help: "help",
 	pause: "pause",
 	stop: "pause",

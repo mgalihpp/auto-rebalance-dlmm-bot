@@ -30,6 +30,7 @@ import { formatSig, nowStamp } from "../utils.ts";
 import {
 	executeReaccumulateToSol,
 	type ReaccumulateInput,
+	WSOL_MINT,
 } from "./reaccumulate.ts";
 import {
 	SWAP_CU_BUFFER_MULTIPLIER,
@@ -96,6 +97,17 @@ export function compoundTopUpAmounts(
 		return null;
 	}
 	return { x, y };
+}
+
+// DLMM addLiquidityByStrategy wraps the SOL-side deposit from native lamports
+// itself, so native SOL is what that side can spend. Claims and the zap
+// clean-up both close the wSOL ATA, so it usually reads 0 by now anyway.
+export function compoundSpendableBalance(
+	mint: string,
+	ataBalance: BN,
+	nativeLamports: BN,
+): BN {
+	return mint === WSOL_MINT ? nativeLamports : ataBalance;
 }
 
 function toZapError(error: unknown): ZapError {
@@ -298,8 +310,21 @@ function executeCompoundTopUp(
 			try: () => getLbPairState(connection, lbPair),
 			catch: toZapError,
 		});
-		const balX = yield* readAtaBalance(pairState.tokenXMint);
-		const balY = yield* readAtaBalance(pairState.tokenYMint);
+		const nativeLamports = yield* Effect.tryPromise({
+			try: () => connection.getBalance(signer.publicKey),
+			catch: toZapError,
+		});
+		const native = new BN(nativeLamports);
+		const balX = compoundSpendableBalance(
+			pairState.tokenXMint.toBase58(),
+			yield* readAtaBalance(pairState.tokenXMint),
+			native,
+		);
+		const balY = compoundSpendableBalance(
+			pairState.tokenYMint.toBase58(),
+			yield* readAtaBalance(pairState.tokenYMint),
+			native,
+		);
 		const amounts = compoundTopUpAmounts(input.feeX, input.feeY, balX, balY);
 		if (amounts === null) {
 			console.log(

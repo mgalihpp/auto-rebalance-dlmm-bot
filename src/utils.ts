@@ -15,6 +15,10 @@ export function solscanTxUrl(sig: string): string {
 	return `https://solscan.io/tx/${sig}`;
 }
 
+export function jitoBundleUrl(bundleId: string): string {
+	return `https://explorer.jito.wtf/bundle/${bundleId}`;
+}
+
 export function solscanAccountUrl(addr: string): string {
 	return `https://solscan.io/account/${addr}`;
 }

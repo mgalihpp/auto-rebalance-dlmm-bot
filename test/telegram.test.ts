@@ -243,6 +243,24 @@ describe("formatTelegramMessage", () => {
 		]);
 	});
 
+	test("rebalanced adds a Jito bundle link after the tx when bundled", () => {
+		const text = formatTelegramMessage({
+			kind: "rebalanced",
+			pool: POOL,
+			position: POSITION,
+			pair: "PEPE/SOL",
+			signature: SIG,
+			bundleId: "abc123",
+		});
+		expectPhoneLayout(text);
+		expect(hrefsOf(text)).toEqual([
+			`https://solscan.io/tx/${SIG}`,
+			"https://explorer.jito.wtf/bundle/abc123",
+			`https://app.meteora.ag/dlmm/${POOL}`,
+			`https://solscan.io/account/${POSITION}`,
+		]);
+	});
+
 	test("feesClaimed names the action and shows the value", () => {
 		const base = {
 			kind: "feesClaimed",

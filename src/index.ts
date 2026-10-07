@@ -450,6 +450,7 @@ function runIteration() {
 			position: snapshot.position,
 			pair: pairOf(snapshot),
 			signature: done.signature,
+			bundleId: done.bundleId,
 		});
 	});
 }
@@ -848,6 +849,7 @@ function drainPendingConfirm() {
 				position: snapshot.position,
 				pair: pairOf(snapshot),
 				signature: done.signature,
+				bundleId: done.bundleId,
 			});
 		}),
 		(error) =>

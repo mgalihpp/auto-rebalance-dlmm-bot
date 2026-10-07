@@ -373,7 +373,7 @@ const PREP_LABELS: ReadonlySet<string> = new Set(["setup", "init-bin-array"]);
 export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	input: ZapExecuteInput,
 ): Effect.fn.Return<
-	{ signature: string },
+	{ signature: string; bundleId?: string },
 	ZapError,
 	SolanaConnection | AppSigner | AppConfig | RuntimeTunables
 > {
@@ -421,6 +421,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	}
 	const config = yield* AppConfig;
 	let last = "";
+	let bundleId: string | undefined;
 	if (config.jitoBundle) {
 		// setup (idempotent ATAs) and init-bin-array are harmless alone and
 		// push the zap past the 5-tx bundle cap, so they go first on their own.
@@ -430,7 +431,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		for (const leg of prep) {
 			yield* sendZapTx(leg.tx, leg.label);
 		}
-		const signatures = yield* Effect.mapError(
+		const bundle = yield* Effect.mapError(
 			sendJitoBundle({
 				legs: core,
 				tipLamports: config.jitoTipLamports,
@@ -438,7 +439,8 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 			}),
 			(error) => toZapError(error),
 		);
-		last = signatures.at(-1) ?? "";
+		last = bundle.signatures.at(-1) ?? "";
+		bundleId = bundle.bundleId;
 	} else {
 		for (const leg of legs) {
 			last = yield* sendZapTx(
@@ -460,7 +462,7 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 		topUp = yield* executeCompoundTopUp(input.compound);
 	}
 	const sweep = yield* executeReaccumulateToSol(input.reaccumulate);
-	return { signature: sweep ?? topUp ?? last };
+	return { signature: sweep ?? topUp ?? last, bundleId };
 });
 
 export function describeZapSwap(estimate: DlmmDirectRebalanceEstimate): string {

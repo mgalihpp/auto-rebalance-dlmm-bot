@@ -5,6 +5,7 @@ import type { PositionSnapshot } from "../rebalance/types.ts";
 import {
 	formatBinRange,
 	formatTokenAmount,
+	jitoBundleUrl,
 	meteoraPoolUrl,
 	nowStamp,
 	rangeDirection,
@@ -53,6 +54,8 @@ export type TelegramEvent =
 			position: string;
 			pair: string;
 			signature: string;
+			// Set when the zap landed as a Jito bundle (JITO_BUNDLE=true).
+			bundleId?: string;
 	  }
 	| {
 			kind: "feesClaimed";
@@ -473,6 +476,9 @@ const telegramFormatters: {
 			[`Tx: ${code(shortAddr(event.signature))}`],
 			[
 				txLink(event.signature),
+				...(event.bundleId
+					? [["Jito", jitoBundleUrl(event.bundleId)] as const]
+					: []),
 				poolLink(event.pool),
 				positionLink(event.position),
 			],

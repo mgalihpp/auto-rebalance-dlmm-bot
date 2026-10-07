@@ -9,7 +9,7 @@ import {
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
 import { AppSigner, SolanaConnection } from "../services.ts";
-import { formatSig, nowStamp } from "../utils.ts";
+import { formatSig, jitoBundleUrl, nowStamp } from "../utils.ts";
 
 export class SendError extends Data.TaggedError("SendError")<{
 	message: string;
@@ -606,7 +606,11 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
 
 export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 	input: SendBundleInput,
-): Effect.fn.Return<string[], SendError, SolanaConnection | AppSigner> {
+): Effect.fn.Return<
+	{ signatures: string[]; bundleId?: string },
+	SendError,
+	SolanaConnection | AppSigner
+> {
 	const connection = yield* SolanaConnection;
 	const signer = yield* AppSigner;
 	return yield* Effect.tryPromise({
@@ -689,7 +693,13 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 			};
 
 			let lastSignatures: string[] | undefined;
-			const sendOnce = async (attempt: number): Promise<string[]> => {
+			let lastBundleId: string | undefined;
+			const sendOnce = async (
+				attempt: number,
+			): Promise<{
+				signatures: string[];
+				bundleId?: string;
+			}> => {
 				const { blockhash, lastValidBlockHeight } =
 					await connection.getLatestBlockhash("confirmed");
 				const simTxs = build(
@@ -755,6 +765,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 				const signatures = signaturesOf(finalTxs);
 				const encoded = finalTxs.map((tx) => tx.serialize().toString("base64"));
 				lastSignatures = signatures;
+				lastBundleId = undefined;
 				const submit = async (): Promise<string> => {
 					const payload = await postJson(
 						`${input.blockEngineUrl.replace(/\/+$/, "")}/api/v1/bundles`,
@@ -782,8 +793,9 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 						`[bundle] ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
+				lastBundleId = bundleId;
 				console.log(
-					`[${nowStamp()}] [bundle] submitted ${labels.join(" -> ")}: https://explorer.jito.wtf/bundle/${bundleId}`,
+					`[${nowStamp()}] [bundle] submitted ${labels.join(" -> ")}: ${jitoBundleUrl(bundleId)}`,
 				);
 
 				let lastSend = Date.now();
@@ -803,7 +815,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 								`[${nowStamp()}] [${labels[index]}] confirmed: ${formatSig(signature)}`,
 							);
 						}
-						return signatures;
+						return { signatures, bundleId };
 					}
 					if (landing.kind === "failed") {
 						throw describeLanding(landing, signatures.length);
@@ -849,7 +861,7 @@ export const sendJitoBundle = Effect.fn("sendJitoBundle")(function* (
 							// Status check itself failed; rebuild below.
 						}
 						if (landing?.kind === "landed") {
-							return lastSignatures;
+							return { signatures: lastSignatures, bundleId: lastBundleId };
 						}
 						const partial =
 							landing && describeLanding(landing, lastSignatures.length);

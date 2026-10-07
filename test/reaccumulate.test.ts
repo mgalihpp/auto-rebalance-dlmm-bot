@@ -1,9 +1,73 @@
 import { describe, expect, test } from "bun:test";
 import BN from "bn.js";
-import { planSweepLegs, WSOL_MINT } from "../src/rebalance/reaccumulate.ts";
+import {
+	feeValueInLamports,
+	planSweepLegs,
+	WSOL_MINT,
+} from "../src/rebalance/reaccumulate.ts";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+
+describe("feeValueInLamports", () => {
+	test("Y is SOL: feeY plus feeX times price, floored", () => {
+		const value = feeValueInLamports({
+			feeX: new BN(1_000_001),
+			feeY: new BN(500),
+			mintX: USDC_MINT,
+			mintY: WSOL_MINT,
+			pricePerLamport: "0.0075",
+		});
+		// 1_000_001 * 0.0075 = 7500.0075 -> 7500
+		expect(value?.toString()).toBe("8000");
+	});
+
+	test("X is SOL: feeX plus feeY divided by price, floored", () => {
+		const value = feeValueInLamports({
+			feeX: new BN(2_000),
+			feeY: new BN(1_000),
+			mintX: WSOL_MINT,
+			mintY: USDC_MINT,
+			pricePerLamport: "0.3",
+		});
+		// 1_000 / 0.3 = 3333.33 -> 3333
+		expect(value?.toString()).toBe("5333");
+	});
+
+	test("X is SOL with a non-positive price counts only the SOL side", () => {
+		const value = feeValueInLamports({
+			feeX: new BN(2_000),
+			feeY: new BN(1_000),
+			mintX: WSOL_MINT,
+			mintY: USDC_MINT,
+			pricePerLamport: "0",
+		});
+		expect(value?.toString()).toBe("2000");
+	});
+
+	test("neither side SOL is null", () => {
+		expect(
+			feeValueInLamports({
+				feeX: new BN(1),
+				feeY: new BN(1),
+				mintX: USDC_MINT,
+				mintY: USDT_MINT,
+				pricePerLamport: "1",
+			}),
+		).toBeNull();
+	});
+
+	test("zero and negative fees value to zero", () => {
+		const value = feeValueInLamports({
+			feeX: new BN(-5),
+			feeY: new BN(0),
+			mintX: USDC_MINT,
+			mintY: WSOL_MINT,
+			pricePerLamport: "2",
+		});
+		expect(value?.toString()).toBe("0");
+	});
+});
 
 describe("planSweepLegs", () => {
 	test("plans a swap leg per nonzero side", () => {

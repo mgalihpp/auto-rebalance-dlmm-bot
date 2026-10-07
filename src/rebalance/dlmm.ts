@@ -116,6 +116,7 @@ export const loadPositionState = Effect.fn("loadPositionState")(function* (
 		position: position.publicKey.toBase58(),
 		owner: owner.toBase58(),
 		activeBinId: activeBin.binId,
+		activeBinPrice: activeBin.price,
 		lowerBinId: data.lowerBinId,
 		upperBinId: data.upperBinId,
 		amountX: new BN(data.totalXAmount),

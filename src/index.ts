@@ -1,5 +1,11 @@
 import { config as loadDotenv } from "dotenv";
 import { Effect, Ref } from "effect";
+import {
+	ACTIVITY_FILE,
+	activityEntry,
+	activityFromEvent,
+	makeActivityLog,
+} from "./activity.ts";
 import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { executeInRangeFeeClaim, feeClaimAction } from "./rebalance/fees.ts";
@@ -44,6 +50,7 @@ import {
 	configMenuKeyboard,
 	configValueKeyboard,
 	confirmInlineKeyboard,
+	formatActivityReply,
 	formatConfigBadValue,
 	formatConfigPick,
 	formatConfigPreview,
@@ -154,9 +161,17 @@ function printPreview(
 	}
 }
 
-// Telegram send that never fails the caller. Disabled when telegram is unset.
+const activityLog = makeActivityLog(ACTIVITY_FILE);
+
+// Every event lands in the activity log, even with Telegram disabled. The
+// in-range path never calls notify, so routine checks stay out of the log.
+// Telegram send never fails the caller.
 function notify(event: TelegramEvent) {
 	return Effect.gen(function* () {
+		const entry = activityFromEvent(event);
+		if (entry) {
+			yield* activityLog.record(entry);
+		}
 		const config = yield* AppConfig;
 		yield* notifyTelegramEvent(event, config.telegram);
 	});
@@ -218,6 +233,8 @@ function getTunables() {
 		return yield* Ref.get(ref);
 	});
 }
+
+await Effect.runPromise(activityLog.load());
 
 await Effect.runPromise(
 	Effect.provide(
@@ -459,10 +476,17 @@ function handleBotCommand(command: BotCommand) {
 				);
 				return;
 			}
+			if (command.kind === "logs") {
+				yield* replyText(formatActivityReply(activityLog.recent(15)));
+				return;
+			}
 			if (command.kind === "pause") {
 				const already = isBotPaused();
 				setBotPaused(true);
 				console.log(`[${nowStamp()}] Bot paused via Telegram command.`);
+				if (!already) {
+					yield* activityLog.record(activityEntry("paused", "Paused"));
+				}
 				yield* replyText(formatPausedReply(already));
 				return;
 			}
@@ -470,6 +494,9 @@ function handleBotCommand(command: BotCommand) {
 				const already = !isBotPaused();
 				setBotPaused(false);
 				console.log(`[${nowStamp()}] Bot resumed via Telegram command.`);
+				if (!already) {
+					yield* activityLog.record(activityEntry("resumed", "Resumed"));
+				}
 				yield* replyText(formatResumedReply(already));
 				return;
 			}
@@ -544,6 +571,13 @@ function handleBotCommand(command: BotCommand) {
 				const ref = yield* RuntimeTunables;
 				yield* Ref.set(ref, updated);
 				const newDisplay = entry.getDisplay(updated);
+				yield* activityLog.record(
+					activityEntry(
+						"configChanged",
+						"Config changed",
+						`${normalized}: ${shortAddr(oldDisplay)} → ${shortAddr(newDisplay)}`,
+					),
+				);
 				// Every editable key persists for restarts. Best-effort and never
 				// logs secrets; the in-memory switch already took effect.
 				yield* Effect.catch(

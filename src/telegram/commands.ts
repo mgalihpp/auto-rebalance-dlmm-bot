@@ -28,6 +28,7 @@ export type BotCommand =
 	| { kind: "help"; chatId: string; updateId: number; callbackId?: string }
 	| { kind: "pause"; chatId: string; updateId: number; callbackId?: string }
 	| { kind: "resume"; chatId: string; updateId: number; callbackId?: string }
+	| { kind: "logs"; chatId: string; updateId: number; callbackId?: string }
 	| {
 			kind: "rebalance";
 			chatId: string;
@@ -362,10 +363,43 @@ export function parseConfigMenuAction(data: string): ConfigMenuAction | null {
 }
 
 export const TELEGRAM_HELP_TEXT =
-	"DLMM bot commands (or use the menu buttons below):\n/status - show position snapshot (read-only)\n/help - show this help\n/pause (or /stop) - pause auto-rebalance loop, Telegram stays responsive\n/resume (or /start) - resume auto-rebalance loop\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
+	"DLMM bot commands (or use the menu buttons below):\n/status - show position snapshot (read-only)\n/logs - show recent bot activity\n/help - show this help\n/pause (or /stop) - pause auto-rebalance loop, Telegram stays responsive\n/resume (or /start) - resume auto-rebalance loop\n/rebalance - preview rebalance (no transactions)\n/rebalance confirm - execute live (only when DRY_RUN=false, otherwise still preview only)\n/config - show editable config values\n/config set KEY VALUE - update one value (POOL_ADDRESS needs a confirm suffix)\n/config set POOL_ADDRESS <addr> confirm - switch pool (clears queued live confirm, persists to .env)";
+
+// Commands that carry nothing beyond chat, update and callback ids.
+type SimpleKind = Exclude<
+	BotCommand["kind"],
+	"rebalance" | "config_pick" | "config_set" | "unknown"
+>;
+
+function simpleCommand(
+	kind: SimpleKind,
+	chatId: string,
+	updateId: number,
+	callbackId?: string,
+): BotCommand {
+	return { kind, chatId, updateId, callbackId };
+}
+
+// Own keys only, so chat text like "constructor" never hits Object.prototype.
+function lookup<V>(table: Record<string, V>, key: string): V | undefined {
+	return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
+const SLASH_COMMANDS: Record<string, SimpleKind> = {
+	"/status": "status",
+	"/help": "help",
+	"/pause": "pause",
+	"/stop": "pause",
+	"/resume": "resume",
+	"/start": "resume",
+	"/logs": "logs",
+};
 
 // Menu button labels resolve to the same commands as their slash equivalents.
-const MENU_LABELS: Record<string, BotCommand["kind"]> = {
+// Typed labels from the old reply keyboard keep working.
+const MENU_LABELS: Record<string, SimpleKind | "rebalance"> = {
+	"📜 logs": "logs",
+	logs: "logs",
 	"📊 status": "status",
 	status: "status",
 	"❓ help": "help",
@@ -385,8 +419,9 @@ const MENU_LABELS: Record<string, BotCommand["kind"]> = {
 	config: "config_show",
 };
 
-const CALLBACK_DATA: Record<string, BotCommand["kind"]> = {
+const CALLBACK_DATA: Record<string, SimpleKind | "rebalance"> = {
 	status: "status",
+	logs: "logs",
 	help: "help",
 	pause: "pause",
 	stop: "pause",
@@ -405,24 +440,12 @@ function commandFromMenuLabel(
 	id: number,
 	callbackId?: string,
 ): BotCommand | null {
-	const kind = MENU_LABELS[normalized];
+	const kind = lookup(MENU_LABELS, normalized);
 	if (!kind) {
 		return null;
 	}
-	if (kind === "status") {
-		return { kind: "status", chatId, updateId: id, callbackId };
-	}
-	if (kind === "help") {
-		return { kind: "help", chatId, updateId: id, callbackId };
-	}
-	if (kind === "config_show") {
-		return { kind: "config_show", chatId, updateId: id, callbackId };
-	}
-	if (kind === "pause") {
-		return { kind: "pause", chatId, updateId: id, callbackId };
-	}
-	if (kind === "resume") {
-		return { kind: "resume", chatId, updateId: id, callbackId };
+	if (kind !== "rebalance") {
+		return simpleCommand(kind, chatId, id, callbackId);
 	}
 	return {
 		kind: "rebalance",
@@ -466,41 +489,9 @@ export function parseBotCommand(
 		if (String(chatId) !== allowedChatId) {
 			return null;
 		}
-		const kind = CALLBACK_DATA[data];
-		if (kind === "status") {
-			return {
-				kind: "status",
-				chatId: allowedChatId,
-				updateId: id,
-				callbackId,
-			};
-		}
-		if (kind === "help") {
-			return { kind: "help", chatId: allowedChatId, updateId: id, callbackId };
-		}
-		if (kind === "config_show") {
-			return {
-				kind: "config_show",
-				chatId: allowedChatId,
-				updateId: id,
-				callbackId,
-			};
-		}
-		if (kind === "pause") {
-			return {
-				kind: "pause",
-				chatId: allowedChatId,
-				updateId: id,
-				callbackId,
-			};
-		}
-		if (kind === "resume") {
-			return {
-				kind: "resume",
-				chatId: allowedChatId,
-				updateId: id,
-				callbackId,
-			};
+		const kind = lookup(CALLBACK_DATA, data);
+		if (kind && kind !== "rebalance") {
+			return simpleCommand(kind, allowedChatId, id, callbackId);
 		}
 		if (kind === "rebalance") {
 			return {
@@ -575,17 +566,9 @@ export function parseBotCommand(
 	const parts = text.split(/\s+/);
 	const first = parts[0] ?? "";
 	const base = (first.split("@")[0] ?? "").toLowerCase();
-	if (base === "/status") {
-		return { kind: "status", chatId: allowedChatId, updateId: id };
-	}
-	if (base === "/help") {
-		return { kind: "help", chatId: allowedChatId, updateId: id };
-	}
-	if (base === "/pause" || base === "/stop") {
-		return { kind: "pause", chatId: allowedChatId, updateId: id };
-	}
-	if (base === "/resume" || base === "/start") {
-		return { kind: "resume", chatId: allowedChatId, updateId: id };
+	const slash = lookup(SLASH_COMMANDS, base);
+	if (slash) {
+		return simpleCommand(slash, allowedChatId, id);
 	}
 	if (base === "/rebalance") {
 		const confirmed = (parts[1] ?? "").toLowerCase() === "confirm";

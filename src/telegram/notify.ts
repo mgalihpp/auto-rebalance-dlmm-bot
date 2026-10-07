@@ -1,4 +1,5 @@
 import { Data, Effect } from "effect";
+import type { ActivityEntry, ActivityKind } from "../activity.ts";
 import type { TelegramConfig } from "../config.ts";
 import type { PositionSnapshot } from "../rebalance/types.ts";
 import {
@@ -78,6 +79,7 @@ export const TELEGRAM_MAIN_MENU = {
 
 export const TELEGRAM_BOT_COMMANDS = [
 	{ command: "status", description: "show position snapshot (read-only)" },
+	{ command: "logs", description: "show recent bot activity" },
 	{ command: "help", description: "show help" },
 	{ command: "pause", description: "pause auto-rebalance loop" },
 	{ command: "resume", description: "resume auto-rebalance loop" },
@@ -416,7 +418,7 @@ export function formatConfigBadValue(
 	]);
 }
 
-const FAILURE_TITLES: Record<FailureStage, string> = {
+export const FAILURE_TITLES: Record<FailureStage, string> = {
 	rebalance: "Rebalance failed",
 	"fee claim": "Fee claim failed",
 	command: "Command failed",
@@ -477,6 +479,65 @@ const telegramFormatters: {
 				: undefined,
 		]),
 };
+
+const ACTIVITY_EMOJI: Record<ActivityKind, string> = {
+	startup: "🤖",
+	shutdown: "🛑",
+	rebalanceNeeded: "⚠️",
+	rebalanced: "✅",
+	feesClaimed: "💰",
+	failed: "❌",
+	paused: "⏸",
+	resumed: "▶️",
+	configChanged: "⚙️",
+};
+
+const MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec",
+];
+
+// Local "07 Oct 09:02".
+export function activityStamp(iso: string): string {
+	const d = new Date(iso);
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${p(d.getDate())} ${MONTHS[d.getMonth()]} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// Long details are cut so 15 lines stay under Telegram's 4096-char limit.
+export function formatActivityLine(entry: ActivityEntry): string {
+	const detail =
+		entry.detail === undefined
+			? ""
+			: ` · ${escapeHtml(entry.detail.length > 80 ? `${entry.detail.slice(0, 79)}…` : entry.detail)}`;
+	const tx = entry.signature
+		? ` · tx <a href="${escapeHtml(solscanTxUrl(entry.signature))}">${escapeHtml(shortAddr(entry.signature))}</a>`
+		: "";
+	const count = (entry.count ?? 1) > 1 ? ` ×${entry.count}` : "";
+	return `${activityStamp(entry.at)} ${ACTIVITY_EMOJI[entry.kind]} ${escapeHtml(entry.title)}${detail}${tx}${count}`;
+}
+
+// Entries arrive newest first.
+export function formatActivityReply(
+	entries: ReadonlyArray<ActivityEntry>,
+): string {
+	return layout(
+		titleLine("📜", "Recent activity"),
+		entries.length === 0
+			? ["No activity yet."]
+			: entries.map(formatActivityLine),
+	);
+}
 
 export function formatTelegramMessage(event: TelegramEvent): string {
 	const format = telegramFormatters[event.kind] as (

@@ -1779,3 +1779,34 @@ describe("pause and resume commands", () => {
 		expect(formatPausedSkip()).toContain("/resume");
 	});
 });
+
+describe("logs command", () => {
+	const allowed = "987654";
+
+	test("slash, label and callback all parse to logs", () => {
+		expect(parseBotCommand(makeUpdate(501, 987654, "/logs"), allowed)).toEqual({
+			kind: "logs",
+			chatId: allowed,
+			updateId: 501,
+		});
+		expect(
+			parseBotCommand(makeUpdate(502, 987654, "📜 Logs"), allowed)?.kind,
+		).toBe("logs");
+		expect(
+			parseBotCommand(makeCallback(503, 987654, "logs"), allowed),
+		).toMatchObject({ kind: "logs", callbackId: "cb1" });
+		expect(TELEGRAM_BOT_COMMANDS).toContainEqual({
+			command: "logs",
+			description: "show recent bot activity",
+		});
+	});
+
+	test("prototype keys in chat text are not commands", () => {
+		expect(
+			parseBotCommand(makeUpdate(504, 987654, "constructor"), allowed),
+		).toBeNull();
+		expect(
+			parseBotCommand(makeCallback(505, 987654, "constructor"), allowed)?.kind,
+		).toBe("unknown");
+	});
+});

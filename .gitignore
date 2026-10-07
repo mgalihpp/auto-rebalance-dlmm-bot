@@ -36,3 +36,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 .agents
 .claude
+
+# bot activity log
+activity.jsonl

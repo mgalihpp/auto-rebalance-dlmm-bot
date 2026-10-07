@@ -1,5 +1,7 @@
 import { PublicKey } from "@solana/web3.js";
+import BN from "bn.js";
 import bs58 from "bs58";
+import Decimal from "decimal.js";
 import { Data, Effect } from "effect";
 import { PRIORITY_SETTINGS, type PrioritySetting } from "./rebalance/send.ts";
 import type { StrategyKind } from "./rebalance/types.ts";
@@ -20,6 +22,7 @@ export interface BotConfig {
 	dryRun: boolean;
 	compoundFees: boolean;
 	reaccumulateFeesToSol: boolean;
+	feeSweepThresholdLamports: BN | null;
 	strategy: StrategyKind;
 	priorityLevel: PrioritySetting;
 	jupiterApiKey?: string;
@@ -42,6 +45,8 @@ export const POLL_INTERVAL_MS_DEFAULT = 60000;
 export const TELEGRAM_POLL_INTERVAL_MS_MIN = 1000;
 export const TELEGRAM_POLL_INTERVAL_MS_MAX = 60000;
 export const TELEGRAM_POLL_INTERVAL_MS_DEFAULT = 3000;
+export const FEE_SWEEP_THRESHOLD_SOL_MAX = 1000;
+export const SOL_DECIMALS = 9;
 
 // Mutable runtime tunables: everything Telegram may edit. DRY_RUN, RPC_URL,
 // PRIVATE_KEY, TELEGRAM_* credentials and JUPITER_API_KEY stay startup-only.
@@ -54,6 +59,7 @@ export type Tunables = Pick<
 	| "strategy"
 	| "compoundFees"
 	| "reaccumulateFeesToSol"
+	| "feeSweepThresholdLamports"
 	| "priorityLevel"
 >;
 
@@ -66,6 +72,7 @@ export function tunablesFromConfig(config: BotConfig): Tunables {
 		strategy: config.strategy,
 		compoundFees: config.compoundFees,
 		reaccumulateFeesToSol: config.reaccumulateFeesToSol,
+		feeSweepThresholdLamports: config.feeSweepThresholdLamports,
 		priorityLevel: config.priorityLevel,
 	};
 }
@@ -300,6 +307,35 @@ export function parseReaccumulateFeesToSolValue(
 	return parseBoolVar("REACCUMULATE_FEES_TO_SOL", trimmed, false);
 }
 
+// "", "off" and "0" disable the sweep. Anything else must be a positive SOL
+// amount with at most 9 decimals so the lamport conversion is exact.
+export function parseFeeSweepThresholdValue(
+	raw: string,
+): Effect.Effect<BN | null, ConfigError> {
+	const trimmed = raw.trim();
+	const lowered = trimmed.toLowerCase();
+	if (lowered === "" || lowered === "off" || lowered === "0") {
+		return Effect.succeed(null);
+	}
+	const invalid = new ConfigError({
+		message: `invalid FEE_SWEEP_THRESHOLD_SOL: expected off or a SOL amount in (0, ${FEE_SWEEP_THRESHOLD_SOL_MAX}] with at most ${SOL_DECIMALS} decimals, got "${raw}"`,
+	});
+	if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+		return Effect.fail(invalid);
+	}
+	const sol = new Decimal(trimmed);
+	if (
+		sol.decimalPlaces() > SOL_DECIMALS ||
+		sol.lte(0) ||
+		sol.gt(FEE_SWEEP_THRESHOLD_SOL_MAX)
+	) {
+		return Effect.fail(invalid);
+	}
+	return Effect.succeed(
+		new BN(sol.mul(new Decimal(10).pow(SOL_DECIMALS)).toFixed(0)),
+	);
+}
+
 export function parsePriorityLevelValue(
 	raw: string,
 ): Effect.Effect<PrioritySetting, ConfigError> {
@@ -394,6 +430,9 @@ export function loadConfig(
 					"invalid config: COMPOUND_FEES and REACCUMULATE_FEES_TO_SOL are mutually exclusive; enable at most one",
 			});
 		}
+		const feeSweepThresholdLamports = yield* parseFeeSweepThresholdValue(
+			optional("FEE_SWEEP_THRESHOLD_SOL", env) ?? "",
+		);
 		const strategy = yield* parseStrategyVar(
 			"STRATEGY",
 			optional("STRATEGY", env),
@@ -441,6 +480,7 @@ export function loadConfig(
 			dryRun,
 			compoundFees,
 			reaccumulateFeesToSol,
+			feeSweepThresholdLamports,
 			strategy,
 			priorityLevel,
 			jupiterApiKey,

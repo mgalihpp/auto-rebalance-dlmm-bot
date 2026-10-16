@@ -98,7 +98,7 @@ describe("isRetryableSimulationError", () => {
 });
 
 describe("simulation blockhash tunables", () => {
-	test("sim uses finalized so any load-balanced node knows the hash", () => {
+	test("sim fallback blockhash is finalized so any node knows it", () => {
 		expect(SIM_BLOCKHASH_COMMITMENT).toBe("finalized");
 	});
 

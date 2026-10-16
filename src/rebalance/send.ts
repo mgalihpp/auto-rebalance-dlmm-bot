@@ -3,6 +3,8 @@ import {
 	type SignatureStatus,
 	Transaction,
 	type TransactionInstruction,
+	TransactionMessage,
+	VersionedTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { Data, Effect } from "effect";
@@ -54,12 +56,13 @@ export const DEFAULT_PRIORITY_LEVEL: PrioritySetting = "High";
 export const DEFAULT_POLL_MS = 1000;
 export const DEFAULT_RESEND_MS = 2500;
 export const MAX_SEND_ATTEMPTS = 3;
-// Simulation-only blockhash commitment. "finalized" is older than "confirmed"
-// but known to every RPC node, so a load-balanced simulate call never sees a
-// "too new" BlockhashNotFound (Helius blockhash-errors blog, "Mismatched
-// RPCs" case; Solana cookbook "Be wary of lagging RPC nodes"). The throwaway
-// simTx is discarded after CU estimation; the real finalTx below still uses a
-// fresh "confirmed" blockhash.
+// Simulation-only blockhash. "finalized" is older than "confirmed" but known
+// to every RPC node, so it is the safest fallback for a load-balanced simulate
+// call (Helius blockhash-errors blog, "Mismatched RPCs" case; Solana cookbook
+// "Be wary of lagging RPC nodes"). The simulate itself asks the node to swap
+// the blockhash out (`replaceRecentBlockhash`), so this only matters for
+// endpoints that ignore that flag; the real finalTx below still uses a fresh
+// "confirmed" blockhash.
 // Delay between simulation-blockhash retries so a lagging node can catch up
 // instead of failing 3x within the same second.
 export const SIM_BLOCKHASH_COMMITMENT = "finalized" as const;
@@ -287,22 +290,38 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 
 				let lastSignature: string | undefined;
 				const sendOnce = async (attempt: number): Promise<string> => {
-					// Throwaway CU-estimation tx: finalized blockhash is universally
-					// known, so any node in a load-balanced pool can simulate it.
+					// Simulate as a v0 message, never as a legacy Transaction.
+					// web3.js only accepts RPC config on the VersionedTransaction
+					// overload, and its legacy path overwrites recentBlockhash with
+					// its own 30s-cached hash before the call — so the hash set here
+					// would be thrown away and every retry would re-simulate the very
+					// same hash. `replaceRecentBlockhash` tells the node to simulate
+					// against a hash that is always valid for it, which removes the
+					// BlockhashNotFound class entirely; the finalized hash below is
+					// the fallback for endpoints that ignore the flag.
 					const simBlockhash = (
 						await connection.getLatestBlockhash(SIM_BLOCKHASH_COMMITMENT)
 					).blockhash;
-					const simTx = new Transaction().add(
+					const simInstructions = [
 						ComputeBudgetProgram.setComputeUnitLimit({
 							units: SIMULATION_CU_LIMIT,
 						}),
 						...base,
+					];
+					const simTx = new VersionedTransaction(
+						new TransactionMessage({
+							payerKey: payer,
+							recentBlockhash: simBlockhash,
+							instructions: simInstructions,
+						}).compileToV0Message(),
 					);
-					simTx.feePayer = payer;
-					simTx.recentBlockhash = simBlockhash;
-					simTx.sign(signer);
 
-					const simulation = await connection.simulateTransaction(simTx);
+					// Unsigned on purpose: replaceRecentBlockhash rewrites the message
+					// anyway, and sigVerify stays off for a CU-only probe.
+					const simulation = await connection.simulateTransaction(simTx, {
+						replaceRecentBlockhash: true,
+						sigVerify: false,
+					});
 					if (simulation.value.err) {
 						const raw = JSON.stringify(simulation.value.err);
 						if (isRetryableSimulationError(raw)) {
@@ -325,7 +344,15 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 						input.cuBufferMultiplier ?? CU_BUFFER_MULTIPLIER,
 						input.cuMinLimit,
 					);
-					const probeBase58 = bs58.encode(simTx.serialize());
+					// Helius documents a signed legacy transaction for its fee API
+					// (the v0 shape is not listed), so the probe keeps that form
+					// rather than risking a no-estimate payload that would silently
+					// drop the priority fee to 0.
+					const probeTx = new Transaction().add(...simInstructions);
+					probeTx.feePayer = payer;
+					probeTx.recentBlockhash = simBlockhash;
+					probeTx.sign(signer);
+					const probeBase58 = bs58.encode(probeTx.serialize());
 					const microLamports = await fetchPriorityFeeEstimate(
 						connection.rpcEndpoint,
 						probeBase58,

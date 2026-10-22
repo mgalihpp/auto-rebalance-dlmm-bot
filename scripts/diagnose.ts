@@ -211,7 +211,7 @@ const main = Effect.gen(function* () {
 		);
 		console.log(
 			`  index ${index.toString().padStart(4)}      ${key.toBase58()} ` +
-				`${info === null ? "MISSING (System program)" : describeOwner(info.owner)}`,
+				`${info === null ? "MISSING (System program)" : `${describeOwner(info.owner)} rent ${(info.lamports / 1e9).toFixed(4)} SOL`}`,
 		);
 		if (info === null) {
 			problems.push(

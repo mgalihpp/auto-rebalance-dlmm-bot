@@ -1,10 +1,11 @@
-import DLMM from "@meteora-ag/dlmm";
+import DLMM, { getBinArraysRequiredByPositionRange } from "@meteora-ag/dlmm";
 import type {
 	DlmmDirectRebalanceEstimate,
 	RebalanceDlmmPositionResponse,
 	ZapConfig,
 } from "@meteora-ag/zap-sdk";
 import {
+	DLMM_PROGRAM_ID,
 	DlmmSwapType,
 	estimateDlmmRebalanceSwap,
 	getLbPairState,
@@ -243,6 +244,68 @@ function ensureUserTokenAccounts(
 	});
 }
 
+// zap-sdk hands the zap-in leg one bin array per array its target range
+// touches, computed as "array holding the range start" plus "the next array
+// up" even when the range never reaches it. A bin array PDA that was never
+// initialized still exists as an address, but the System program owns it, so
+// the DLMM CPI rejects the whole zap with 3007 (AccountOwnedByWrongProgram)
+// instead of reporting a missing account. Create that gap before the zap.
+function missingBinArrayTransaction(
+	plan: ZapPlan,
+): Effect.Effect<Transaction | null, ZapError, SolanaConnection | AppSigner> {
+	return Effect.gen(function* () {
+		const connection = yield* SolanaConnection;
+		const signer = yield* AppSigner;
+		const lbPair = plan.estimate.context.lbPair;
+		const pairState = yield* Effect.tryPromise({
+			try: () => getLbPairState(connection, lbPair),
+			catch: toZapError,
+		});
+		const required = getBinArraysRequiredByPositionRange(
+			lbPair,
+			new BN(pairState.activeId + plan.minDeltaId),
+			new BN(pairState.activeId + plan.maxDeltaId),
+			DLMM_PROGRAM_ID,
+		);
+		const infos = yield* Effect.tryPromise({
+			try: () =>
+				connection.getMultipleAccountsInfo(required.map((item) => item.key)),
+			catch: toZapError,
+		});
+		const missing = required.filter((_, index) => infos[index] == null);
+		if (missing.length === 0) {
+			return null;
+		}
+		const dlmm = yield* Effect.tryPromise({
+			try: () => DLMM.create(connection, lbPair),
+			catch: toZapError,
+		});
+		const instructions: TransactionInstruction[] = [];
+		for (const { key, index } of missing) {
+			instructions.push(
+				yield* Effect.tryPromise({
+					try: () =>
+						dlmm.program.methods
+							.initializeBinArray(index)
+							.accountsPartial({
+								binArray: key,
+								funder: signer.publicKey,
+								lbPair,
+							})
+							.instruction(),
+					catch: toZapError,
+				}),
+			);
+		}
+		console.log(
+			`[${nowStamp()}] Bin arrays missing for the zap-in range: ${missing
+				.map((item) => item.index.toString())
+				.join(", ")}`,
+		);
+		return new Transaction().add(...instructions);
+	});
+}
+
 // Wallet balance of one side's ATA. ensureUserTokenAccounts runs earlier in
 // the same execute, so the ATA already exists and the helper's `ix` is null.
 function readAtaBalance(
@@ -407,6 +470,14 @@ export const executeZapRebalance = Effect.fn("executeZapRebalance")(function* (
 	for (const [label, tx] of txs) {
 		if (!tx) {
 			continue;
+		}
+		// Every SDK init leg has landed by now, so this fills only the gap the
+		// zap-in account list leaves behind.
+		if (label === "zap-in") {
+			const extra = yield* missingBinArrayTransaction(input.plan);
+			if (extra) {
+				last = yield* sendZapTx(extra, "init-bin-array-extra");
+			}
 		}
 		last = yield* sendZapTx(
 			tx,

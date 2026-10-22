@@ -24,6 +24,7 @@ Keeps a [Meteora DLMM](https://docs.meteora.ag/get-started) liquidity position i
    - Reuses your current range width, re-centered on the active bin.
    - Asks `zap-sdk` to estimate the balancing swap.
    - Builds a remove → swap → zap-in sequence for the existing position.
+   - Creates any bin array account the zap-in leg needs but the pool has not created yet. One-time rent, reused by later rebalances.
    - Sends the transaction unless `DRY_RUN=true`.
 
 Claimed fees come out with the withdrawal. By default they stay in your wallet. Set `COMPOUND_FEES=true` to put them back in on rebalance.
@@ -142,6 +143,7 @@ src/
     send.ts               # transaction sending
 scripts/
   test-rebalance.ts       # manual live rebalance trigger (--live)
+  diagnose.ts             # read-only ownership probe, sends nothing
 test/                     # offline unit tests (bun:test)
 docs/                     # vendored Meteora / Jupiter references
 ```
@@ -170,6 +172,30 @@ bun run scripts/test-rebalance.ts --live
 ```
 
 Without `--live` it exits immediately without touching RPC. It waits 5 seconds before sending so you can abort with `Ctrl+C`.
+
+When a live run fails inside the zap, this read-only probe prints the owner program of every account the zap-in leg reads: mints and their token programs, wallet ATAs, the position, the bin arrays the target range needs, and the zap ledger. It sends no transactions and exits non-zero when something is off.
+
+```bash
+bun run scripts/diagnose.ts
+```
+
+## Troubleshooting
+
+`[zap-in] simulation failed: {"InstructionError":[1,{"Custom":3007}]}` means an account the zap-in leg passes is owned by a program other than the one that expects it. `3007` is Anchor's `AccountOwnedByWrongProgram`, not a DLMM or Zap error code. Anchor logs the culprit, and the bot keeps that block in the message:
+
+```text
+[zap-in] simulation failed: {...} — AnchorError caused by account: bin_array. Error Code: AccountOwnedByWrongProgram. Error Number: 3007. ... | Left: 11111111111111111111111111111111 | Right: LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
+```
+
+`Left` is the owner the account actually has, `Right` is the owner the program wanted.
+
+| `Left` | Meaning | Fix |
+| --- | --- | --- |
+| `1111…` System program | The address exists but was never initialized | Bin arrays are created automatically before the zap-in leg; for any other account, run the probe |
+| `TokenzQd…` Token-2022 | The mint or ATA belongs to the other token program | Run the probe, compare mint owner with the token program on that side |
+| anything else | A stale or wrong account is being passed | Run the probe and compare it with the account list in `docs/meteora-llms-full.txt` |
+
+`bun run scripts/diagnose.ts` prints those same owners, so the `Left`/`Right` pair maps straight onto its output. No transaction is sent.
 
 ## Safety
 

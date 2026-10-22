@@ -241,6 +241,47 @@ async function fetchPriorityFeeEstimate(
 	}
 }
 
+const PROGRAM_LOG_PREFIX = "Program log: ";
+
+// Anchor writes the failing account and both owner programs into the
+// simulation logs:
+//   Program log: AnchorError caused by account: user_token_x. ...
+//   Program log: Left:  <actual owner>
+//   Program log: Right: <expected owner>
+// Without that block, a bare Custom(3007) / Custom(3012) gives nothing to act
+// on. The rest of the logs stays out of the message on purpose: it can run to
+// hundreds of lines and this message reaches Telegram.
+export function anchorErrorContext(
+	logs: readonly string[] | null | undefined,
+): string | null {
+	if (!logs || logs.length === 0) {
+		return null;
+	}
+	const text = logs.map((line) =>
+		line.startsWith(PROGRAM_LOG_PREFIX)
+			? line.slice(PROGRAM_LOG_PREFIX.length)
+			: line,
+	);
+	const start = text.findIndex((line) =>
+		line.includes("AnchorError caused by account"),
+	);
+	if (start === -1) {
+		return null;
+	}
+	const parts = [text[start] as string];
+	for (const label of ["Left:", "Right:"] as const) {
+		const at = text.indexOf(label, start + 1);
+		if (at === -1) {
+			continue;
+		}
+		const value = text[at + 1];
+		if (value !== undefined && value !== "") {
+			parts.push(`${label} ${value}`);
+		}
+	}
+	return parts.join(" | ");
+}
+
 // Retryable send failure: rebuild with a fresh blockhash and re-sign (Helius:
 // only ever re-sign with a new blockhash). Simulation and on-chain failures
 // throw SendError and abort without retry.
@@ -329,8 +370,9 @@ export const sendManualTransaction = Effect.fn("sendManualTransaction")(
 								`[${label}] simulation hit a stale blockhash, retrying with a fresh one: ${raw}`,
 							);
 						}
+						const context = anchorErrorContext(simulation.value.logs);
 						throw new SendError({
-							message: `[${label}] simulation failed: ${raw}`,
+							message: `[${label}] simulation failed: ${raw}${context === null ? "" : ` — ${context}`}`,
 						});
 					}
 					const unitsConsumed = simulation.value.unitsConsumed;

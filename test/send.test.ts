@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	anchorErrorContext,
 	buildComputeBudgetInstructions,
 	COMPUTE_BUDGET_PROGRAM_ID,
 	computeUnitLimitWithBuffer,
@@ -122,5 +123,37 @@ describe("parsePriorityFeeEstimate", () => {
 		expect(
 			parsePriorityFeeEstimate({ result: { priorityFeeEstimate: -10 } }),
 		).toBe(0);
+	});
+});
+
+describe("anchorErrorContext", () => {
+	const anchorLine =
+		"AnchorError caused by account: user_token_x. Error Code: AccountOwnedByWrongProgram. Error Number: 3007. Error Message: The given account is owned by a different program than expected.";
+	const logs = [
+		"Program 11111111111111111111111111111111 invoke [1]",
+		"Program log: Instruction: ZapInDlmmForInitializedPosition",
+		`Program log: ${anchorLine}`,
+		"Program log: Left:",
+		"Program log: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+		"Program log: Right:",
+		"Program log: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+		"Program 11111111111111111111111111111111 consumed 50000 of 1400000 compute units",
+	];
+
+	test("keeps the failing account and both owner programs", () => {
+		expect(anchorErrorContext(logs)).toBe(
+			`${anchorLine} | Left: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb | Right: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`,
+		);
+	});
+
+	test("returns null when the logs carry no anchor error", () => {
+		expect(anchorErrorContext(["Program log: Instruction: Swap"])).toBeNull();
+		expect(anchorErrorContext([])).toBeNull();
+		expect(anchorErrorContext(null)).toBeNull();
+		expect(anchorErrorContext(undefined)).toBeNull();
+	});
+
+	test("keeps just the anchor line when owners are absent", () => {
+		expect(anchorErrorContext([`Program log: ${anchorLine}`])).toBe(anchorLine);
 	});
 });

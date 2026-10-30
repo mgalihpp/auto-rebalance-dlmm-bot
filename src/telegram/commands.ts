@@ -8,6 +8,7 @@ import {
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
 	parseReaccumulateFeesToSolValue,
+	parseRebalanceRangeValue,
 	parseSlippageBpsValue,
 	parseStrategyValue,
 	parseTelegramPollIntervalValue,
@@ -77,6 +78,7 @@ export type EditableKey =
 	| "POLL_INTERVAL_MS"
 	| "TELEGRAM_POLL_INTERVAL_MS"
 	| "STRATEGY"
+	| "REBALANCE_RANGE"
 	| "COMPOUND_FEES"
 	| "REACCUMULATE_FEES_TO_SOL"
 	| "FEE_CLAIM_THRESHOLD_SOL"
@@ -88,6 +90,7 @@ export const EDITABLE_KEYS: readonly EditableKey[] = [
 	"POLL_INTERVAL_MS",
 	"TELEGRAM_POLL_INTERVAL_MS",
 	"STRATEGY",
+	"REBALANCE_RANGE",
 	"COMPOUND_FEES",
 	"REACCUMULATE_FEES_TO_SOL",
 	"FEE_CLAIM_THRESHOLD_SOL",
@@ -194,6 +197,46 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 		getDisplay: (tunables) => tunables.strategy,
 		formatParsed: (parsed) => (typeof parsed === "string" ? parsed : "invalid"),
 		presets: ["Spot", "Curve", "BidAsk"],
+	},
+	REBALANCE_RANGE: {
+		key: "REBALANCE_RANGE",
+		parse: (raw) =>
+			Effect.map(parseRebalanceRangeValue(raw), (value): unknown => value),
+		apply: (tunables, raw) =>
+			Effect.map(parseRebalanceRangeValue(raw), (rebalanceRange) => ({
+				...tunables,
+				rebalanceRange,
+			})),
+		describe: () => '"same" or integer half-width in [1, 1024] bins',
+		needsConfirm: false,
+		sideEffect: "applies to the next rebalance",
+		getDisplay: (tunables) =>
+			tunables.rebalanceRange.kind === "same"
+				? "same as current position"
+				: `${tunables.rebalanceRange.halfWidth} bins per side`,
+		formatParsed: (parsed) => {
+			if (
+				typeof parsed === "object" &&
+				parsed !== null &&
+				"kind" in parsed &&
+				parsed.kind === "same"
+			) {
+				return "same";
+			}
+			if (
+				typeof parsed === "object" &&
+				parsed !== null &&
+				"kind" in parsed &&
+				parsed.kind === "fixed" &&
+				"halfWidth" in parsed &&
+				typeof parsed.halfWidth === "number"
+			) {
+				return String(parsed.halfWidth);
+			}
+			return "invalid";
+		},
+		presets: ["same", "10", "25", "50", "100"],
+		customHint: "Custom: type /config set REBALANCE_RANGE same|<half-width>",
 	},
 	COMPOUND_FEES: {
 		key: "COMPOUND_FEES",

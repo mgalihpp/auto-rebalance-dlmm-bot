@@ -953,7 +953,7 @@ describe("parseBotCommand /config", () => {
 });
 
 describe("editable registry", () => {
-	test("covers exactly the nine editable keys", () => {
+	test("covers exactly the ten editable keys", () => {
 		const expected: EditableKey[] = [
 			"COMPOUND_FEES",
 			"FEE_CLAIM_THRESHOLD_SOL",
@@ -961,6 +961,7 @@ describe("editable registry", () => {
 			"POLL_INTERVAL_MS",
 			"POOL_ADDRESS",
 			"PRIORITY_LEVEL",
+			"REBALANCE_RANGE",
 			"SLIPPAGE_BPS",
 			"STRATEGY",
 			"TELEGRAM_POLL_INTERVAL_MS",

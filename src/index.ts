@@ -9,7 +9,7 @@ import {
 import { tunablesFromConfig } from "./config.ts";
 import { loadPositionState } from "./rebalance/dlmm.ts";
 import { executeInRangeFeeClaim, feeClaimAction } from "./rebalance/fees.ts";
-import { originalHalfRange, shouldRebalance } from "./rebalance/plan.ts";
+import { rebalanceHalfRange, shouldRebalance } from "./rebalance/plan.ts";
 import {
 	feeValueInLamports,
 	planSweepLegs,
@@ -367,7 +367,8 @@ function runIteration() {
 			return;
 		}
 
-		const halfWidth = originalHalfRange(
+		const halfWidth = rebalanceHalfRange(
+			tunables.rebalanceRange,
 			snapshot.lowerBinId,
 			snapshot.upperBinId,
 		);
@@ -655,7 +656,8 @@ function handleBotCommand(command: BotCommand) {
 					yield* replyText(formatInRangeReply(snapshot));
 					return;
 				}
-				const halfWidth = originalHalfRange(
+				const halfWidth = rebalanceHalfRange(
+					tunables.rebalanceRange,
 					snapshot.lowerBinId,
 					snapshot.upperBinId,
 				);
@@ -795,7 +797,8 @@ function drainPendingConfirm() {
 				yield* replyText(formatInRangeReply(snapshot));
 				return;
 			}
-			const halfWidth = originalHalfRange(
+			const halfWidth = rebalanceHalfRange(
+				tunables.rebalanceRange,
 				snapshot.lowerBinId,
 				snapshot.upperBinId,
 			);

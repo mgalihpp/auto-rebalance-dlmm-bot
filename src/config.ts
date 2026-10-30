@@ -24,6 +24,7 @@ export interface BotConfig {
 	reaccumulateFeesToSol: boolean;
 	feeClaimThresholdLamports: BN | null;
 	strategy: StrategyKind;
+	rebalanceRange: RebalanceRange;
 	priorityLevel: PrioritySetting;
 	jupiterApiKey?: string;
 	secretKey: Uint8Array;
@@ -31,6 +32,10 @@ export interface BotConfig {
 	telegramPollIntervalMs: number;
 	telegram?: TelegramConfig;
 }
+
+export type RebalanceRange =
+	| { kind: "same" }
+	| { kind: "fixed"; halfWidth: number };
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -57,6 +62,7 @@ export type Tunables = Pick<
 	| "pollIntervalMs"
 	| "telegramPollIntervalMs"
 	| "strategy"
+	| "rebalanceRange"
 	| "compoundFees"
 	| "reaccumulateFeesToSol"
 	| "feeClaimThresholdLamports"
@@ -70,6 +76,7 @@ export function tunablesFromConfig(config: BotConfig): Tunables {
 		pollIntervalMs: config.pollIntervalMs,
 		telegramPollIntervalMs: config.telegramPollIntervalMs,
 		strategy: config.strategy,
+		rebalanceRange: config.rebalanceRange,
 		compoundFees: config.compoundFees,
 		reaccumulateFeesToSol: config.reaccumulateFeesToSol,
 		feeClaimThresholdLamports: config.feeClaimThresholdLamports,
@@ -279,6 +286,26 @@ export function parseStrategyValue(
 	return parseStrategyVar("STRATEGY", trimmed, "Curve");
 }
 
+export function parseRebalanceRangeValue(
+	raw: string,
+): Effect.Effect<RebalanceRange, ConfigError> {
+	const normalized = raw.trim().toLowerCase();
+	if (normalized === "same") {
+		return Effect.succeed({ kind: "same" });
+	}
+	if (!/^\d+$/.test(normalized)) {
+		return Effect.fail(
+			new ConfigError({
+				message: `invalid REBALANCE_RANGE: expected "same" or integer in [1, 1024], got "${raw}"`,
+			}),
+		);
+	}
+	return Effect.map(
+		parseIntVar("REBALANCE_RANGE", normalized, 0, 1, 1024),
+		(halfWidth): RebalanceRange => ({ kind: "fixed", halfWidth }),
+	);
+}
+
 export function parseCompoundFeesValue(
 	raw: string,
 ): Effect.Effect<boolean, ConfigError> {
@@ -438,6 +465,9 @@ export function loadConfig(
 			optional("STRATEGY", env),
 			"Curve",
 		);
+		const rebalanceRange = yield* parseRebalanceRangeValue(
+			optional("REBALANCE_RANGE", env) ?? "same",
+		);
 		const priorityLevel = yield* parsePriorityLevelVar(
 			"PRIORITY_LEVEL",
 			optional("PRIORITY_LEVEL", env),
@@ -482,6 +512,7 @@ export function loadConfig(
 			reaccumulateFeesToSol,
 			feeClaimThresholdLamports,
 			strategy,
+			rebalanceRange,
 			priorityLevel,
 			jupiterApiKey,
 			secretKey,

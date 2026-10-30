@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { StrategyType } from "@meteora-ag/dlmm";
-import { originalHalfRange, shouldRebalance } from "../src/rebalance/plan.ts";
+import {
+	originalHalfRange,
+	rebalanceHalfRange,
+	shouldRebalance,
+} from "../src/rebalance/plan.ts";
 import { toStrategyType } from "../src/rebalance/types.ts";
 
 describe("shouldRebalance", () => {
@@ -23,6 +27,18 @@ describe("originalHalfRange", () => {
 	test("floors the half range on odd widths", () => {
 		expect(originalHalfRange(0, 9)).toBe(4);
 		expect(originalHalfRange(966, 1034)).toBe(34);
+	});
+});
+
+describe("rebalanceHalfRange", () => {
+	test("uses original range by default mode", () => {
+		expect(rebalanceHalfRange({ kind: "same" }, 10, 30)).toBe(10);
+	});
+
+	test("uses configured width on each side", () => {
+		expect(rebalanceHalfRange({ kind: "fixed", halfWidth: 25 }, 10, 30)).toBe(
+			25,
+		);
 	});
 });
 

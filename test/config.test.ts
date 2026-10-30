@@ -11,6 +11,7 @@ import {
 	parsePollIntervalValue,
 	parsePoolAddressValue,
 	parsePriorityLevelValue,
+	parseRebalanceRangeValue,
 	parseSlippageBpsValue,
 	parseStrategyValue,
 	parseTelegramPollIntervalValue,
@@ -25,6 +26,30 @@ function makeEnv(overrides?: EnvSource): EnvSource {
 		...overrides,
 	};
 }
+
+describe("rebalance range", () => {
+	test("defaults to the current position range and accepts a fixed half-width", async () => {
+		const defaultConfig = await Effect.runPromise(loadConfig(makeEnv()));
+		expect(defaultConfig.rebalanceRange).toEqual({ kind: "same" });
+		const configured = await Effect.runPromise(
+			loadConfig(makeEnv({ REBALANCE_RANGE: "25" })),
+		);
+		expect(configured.rebalanceRange).toEqual({ kind: "fixed", halfWidth: 25 });
+		expect(tunablesFromConfig(configured).rebalanceRange).toEqual({
+			kind: "fixed",
+			halfWidth: 25,
+		});
+	});
+
+	test("rejects invalid values", async () => {
+		for (const value of ["", "0", "1025", "2.5", "25bins"]) {
+			const error = await Effect.runPromise(
+				Effect.flip(parseRebalanceRangeValue(value)),
+			);
+			expect(error).toBeInstanceOf(ConfigError);
+		}
+	});
+});
 
 async function loadFailure(env: EnvSource): Promise<unknown> {
 	try {
@@ -270,6 +295,7 @@ describe("strict single-value parsers (Telegram registry reuse)", () => {
 				"pollIntervalMs",
 				"poolAddress",
 				"priorityLevel",
+				"rebalanceRange",
 				"slippageBps",
 				"strategy",
 				"telegramPollIntervalMs",

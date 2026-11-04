@@ -969,6 +969,30 @@ describe("editable registry", () => {
 		expect([...EDITABLE_KEYS].sort()).toEqual([...expected].sort());
 	});
 
+	// index.ts persists String(parsed) to .env; that string must load back.
+	test("persisted value of every preset reloads through loadConfig", async () => {
+		const extra: Partial<Record<EditableKey, string[]>> = {
+			REBALANCE_RANGE: ["1", "1024"],
+			POOL_ADDRESS: [Keypair.generate().publicKey.toBase58()],
+		};
+		for (const key of EDITABLE_KEYS) {
+			const entry = EDITABLE_REGISTRY[key];
+			for (const raw of [...entry.presets, ...(extra[key] ?? [])]) {
+				const parsed = await Effect.runPromise(entry.parse(raw));
+				const persisted = String(parsed);
+				expect(persisted).not.toContain("[object");
+				const config = await Effect.runPromise(
+					loadConfig(makeEnv({ [key]: persisted })),
+				);
+				const fromEnv = entry.getDisplay(tunablesFromConfig(config));
+				const fromCommand = entry.getDisplay(
+					await Effect.runPromise(entry.apply(tunablesFromConfig(config), raw)),
+				);
+				expect(fromEnv).toBe(fromCommand);
+			}
+		}
+	});
+
 	test("startup-only keys are never editable", () => {
 		for (const key of [
 			"DRY_RUN",

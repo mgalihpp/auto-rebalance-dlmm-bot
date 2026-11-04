@@ -200,8 +200,12 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 	},
 	REBALANCE_RANGE: {
 		key: "REBALANCE_RANGE",
+		// Parsed value is the env string ("same" or the half-width), not the
+		// RebalanceRange object: it is what persists to .env.
 		parse: (raw) =>
-			Effect.map(parseRebalanceRangeValue(raw), (value): unknown => value),
+			Effect.map(parseRebalanceRangeValue(raw), (range): unknown =>
+				range.kind === "same" ? "same" : String(range.halfWidth),
+			),
 		apply: (tunables, raw) =>
 			Effect.map(parseRebalanceRangeValue(raw), (rebalanceRange) => ({
 				...tunables,
@@ -214,27 +218,7 @@ export const EDITABLE_REGISTRY: Record<EditableKey, EditableEntry> = {
 			tunables.rebalanceRange.kind === "same"
 				? "same as current position"
 				: `${tunables.rebalanceRange.halfWidth} bins per side`,
-		formatParsed: (parsed) => {
-			if (
-				typeof parsed === "object" &&
-				parsed !== null &&
-				"kind" in parsed &&
-				parsed.kind === "same"
-			) {
-				return "same";
-			}
-			if (
-				typeof parsed === "object" &&
-				parsed !== null &&
-				"kind" in parsed &&
-				parsed.kind === "fixed" &&
-				"halfWidth" in parsed &&
-				typeof parsed.halfWidth === "number"
-			) {
-				return String(parsed.halfWidth);
-			}
-			return "invalid";
-		},
+		formatParsed: (parsed) => (typeof parsed === "string" ? parsed : "invalid"),
 		presets: ["same", "10", "25", "50", "100"],
 		customHint: "Custom: type /config set REBALANCE_RANGE same|<half-width>",
 	},
